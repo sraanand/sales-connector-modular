@@ -10,6 +10,7 @@ from core.roster import *
 from ui.components import *
 import streamlit as st
 import pandas as pd
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -188,12 +189,17 @@ def view_reminders():
                      .rename(columns={"WhenExact":"When (exact)","DealStages":"Stage(s)"}),
                      use_container_width=True)
 
+    # ===== Message Preview (Reminders) with safe initialisation =====
+    edited = pd.DataFrame()  # <-- ensure it's always defined
+
     if isinstance(msgs, pd.DataFrame) and not msgs.empty:
         st.markdown("#### <span style='color:#000000;'>Message Preview (Reminders)</span>", unsafe_allow_html=True)
         edited = render_selectable_messages(msgs, key="reminders")
         if isinstance(skipped_msgs, pd.DataFrame) and not skipped_msgs.empty:
             st.markdown("**Skipped while creating SMS**")
             st.dataframe(skipped_msgs, use_container_width=True)
+    else:
+        st.info("No messages to preview.")
 
     # --- SEND: SMS + update HubSpot ticket_owner ---
     # NOTE: change the button CTA label as requested
@@ -220,11 +226,11 @@ def view_reminders():
             # (Assumes you included 'SalesEmail' in msgs when you built it.)
             phone_to_sales_email = {}
             if "SalesEmail" in msgs.columns:
-                # If there could be duplicates, the first is fine; all rows for that phone
-                # should have the same SalesEmail because of round-robin assignment.
-                grouper = msgs.groupby("Phone", dropna=False)["SalesEmail"].first()
-                phone_to_sales_email = grouper.to_dict()
+                phone_to_sales_email = msgs.groupby("Phone", dropna=False)["SalesEmail"].first().to_dict()
+            else:
+                st.warning("SalesEmail column not found in msgs; HubSpot ticket_owner will not be updated.")
 
+            # 1) Send SMS for each selected row (use the edited text)
             for _, r in to_send.iterrows():
                 phone = str(r["Phone"]).strip()
 
@@ -253,26 +259,22 @@ def view_reminders():
             #  B: nickname (displayed as SalesAssociate)
             #  C..I: Mon..Sun availability
             # Given that, we trust 'SalesEmail' in msgs for the correct HubSpot owner value.
-            for phone in sent_phones:
-                sales_email = phone_to_sales_email.get(phone, "").strip()
-                if not sales_email:
-                    # If for any reason SalesEmail didn't come through, skip updating HS for this phone.
-                    # (Optionally warn so you can fix roster mapping.)
-                    st.warning(f"⚠️ No SalesEmail found for {phone}; skipping HubSpot owner update.")
-                    continue
+            if "SalesEmail" in msgs.columns:
+                for phone in sent_phones:
+                    sales_email = (phone_to_sales_email.get(phone) or "").strip()
+                    if not sales_email:
+                        st.warning(f"⚠️ No SalesEmail found for {phone}; skipping HubSpot owner update for this phone.")
+                        continue
+                    for did in phone_to_deals.get(phone, []):
+                        deal_to_email[str(did)] = sales_email
 
-                # Update ALL deals tied to that phone (you created this map earlier)
-                for did in phone_to_deals.get(phone, []):
-                    deal_to_email[str(did)] = sales_email
-
-            # Perform one or more batch updates (100 per chunk handled inside helper)
-            if deal_to_email:
-                st.info("Updating HubSpot ticket owners…")
-                u_ok, u_fail = hs_update_ticket_owner_map(deal_to_email)
-                if u_ok:
-                    st.success(f"✅ Updated 'ticket_owner' on {u_ok} deal(s)")
-                if u_fail:
-                    st.warning(f"⚠️ Failed to update 'ticket_owner' on {u_fail} deal(s)")
+                if deal_to_email:
+                    st.info("Updating HubSpot ticket owners…")
+                    u_ok, u_fail = hs_update_ticket_owner_map(deal_to_email)
+                    if u_ok:
+                        st.success(f"✅ Updated 'ticket_owner' on {u_ok} deal(s)")
+                    if u_fail:
+                        st.warning(f"⚠️ Failed to update 'ticket_owner' on {u_fail} deal(s)")
 
             if sent:
                 st.balloons()
