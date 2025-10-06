@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 from core.utils import *
 
+
 # ---- show_removed_table ----
 
 def show_removed_table(df: pd.DataFrame, title: str):
@@ -18,7 +19,7 @@ def show_removed_table(df: pd.DataFrame, title: str):
                      "vehicle_make":"Make","vehicle_model":"Model",
                      "dealstage":"Stage"
                  }),
-                 use_container_width=True)
+                 width='stretch')
 
 
 
@@ -54,7 +55,7 @@ def render_trimmed(df: pd.DataFrame, title: str, cols_map: list[tuple[str,str]])
     
     st.dataframe(
         disp[selected].rename(columns=rename), 
-        use_container_width=True,
+        width='stretch',
         column_config=column_config,
         height=400
     )
@@ -80,7 +81,7 @@ def render_selectable_messages(messages_df: pd.DataFrame, key: str) -> pd.DataFr
     edited = st.data_editor(
         view_df,
         key=f"editor_{key}",
-        use_container_width=True,
+        width='stretch',
         height=400,
         column_config={
             "Send": st.column_config.CheckboxColumn("Send", help="Tick to send this SMS", default=False, width="small"),
