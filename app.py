@@ -303,7 +303,7 @@ def header():
         # Try to load the logo, fallback to text if it fails
         try:
             if os.path.exists(logo_path):
-                st.image(logo_path, width=200, width='content')
+                st.image(logo_path, width='stretch')
             else:
                 # Fallback to text logo
                 st.markdown(
