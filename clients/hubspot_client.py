@@ -3,15 +3,62 @@ from config import *
 import requests
 import pandas as pd
 import streamlit as st
-
+import os
 
 # ---- hs_headers ----
 
 def hs_headers() -> dict:
     return {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
 
+def _hs_token() -> str:
+    """
+    Resolve a HubSpot private app token from config or environment.
+    We try a few common names so you do not have to touch code:
+      - HUBSPOT_PRIVATE_APP_TOKEN
+      - HUBSPOT_API_KEY
+      - HUBSPOT_TOKEN
+      - HS_TOKEN
+    Put one of these in Streamlit Secrets.
+    """
+    for key in ("HUBSPOT_PRIVATE_APP_TOKEN", "HUBSPOT_API_KEY", "HUBSPOT_TOKEN", "HS_TOKEN"):
+        val = globals().get(key) or os.getenv(key)
+        if val:
+            return val
+    raise RuntimeError(
+        "HubSpot token not configured. Set HUBSPOT_PRIVATE_APP_TOKEN (or HUBSPOT_API_KEY) "
+        "in Streamlit Cloud → Settings → Secrets."
+    )
 
+def _hs_headers() -> dict:
+    """Standard JSON + Bearer auth headers for HubSpot HTTP calls."""
+    return {
+        "Authorization": f"Bearer {_hs_token()}",
+        "Content-Type": "application/json",
+    }
 
+def _hs_get(path: str, params: dict | None = None) -> dict:
+    """Low-level GET wrapper for HubSpot."""
+    base = "https://api.hubapi.com"
+    url = f"{base}{path}"
+    r = requests.get(url, headers=_hs_headers(), params=params or {}, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+def _hs_post(path: str, payload: dict) -> dict:
+    """Low-level POST wrapper for HubSpot."""
+    base = "https://api.hubapi.com"
+    url = f"{base}{path}"
+    r = requests.post(url, headers=_hs_headers(), json=payload, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
+def _hs_patch(path: str, payload: dict) -> dict:
+    """Low-level PATCH wrapper for HubSpot."""
+    base = "https://api.hubapi.com"
+    url = f"{base}{path}"
+    r = requests.patch(url, headers=_hs_headers(), json=payload, timeout=60)
+    r.raise_for_status()
+    return r.json()
 # ---- hs_get_owner_info ----
 
 def hs_get_owner_info(owner_id):
@@ -27,7 +74,46 @@ def hs_get_owner_info(owner_id):
     except Exception:
         return None
 
+def _search_once(
+    payload: dict,
+    *,
+    total_cap: int = 1000,
+    endpoint: str = "/crm/v3/objects/deals/search"
+) -> pd.DataFrame:
+    """
+    Execute a HubSpot CRM search with safe pagination and return a flat DataFrame
+    of 'properties' plus 'id'. This mirrors the monolith's private helper.
+    """
+    out = []
+    after = None
+    fetched = 0
+    while True:
+        body = dict(payload)  # shallow copy so we do not mutate the caller's payload
+        # Respect a caller-provided 'limit' but never exceed total_cap
+        limit = int(body.get("limit", 100))
+        limit = min(limit, max(0, total_cap - fetched))
+        if limit <= 0:
+            break
+        body["limit"] = limit
+        if after is not None:
+            body["after"] = after
 
+        j = _hs_post(endpoint, body)
+        results = j.get("results", [])
+        out.extend(results)
+        fetched += len(results)
+
+        after = j.get("paging", {}).get("next", {}).get("after")
+        if not after or fetched >= total_cap:
+            break
+
+    # Flatten to DataFrame (properties + id)
+    rows = []
+    for r in out:
+        props = r.get("properties", {}) or {}
+        props["id"] = r.get("id")
+        rows.append(props)
+    return pd.DataFrame(rows)
 
 # ---- hs_get_deal_property_options ----
 
