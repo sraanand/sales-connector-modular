@@ -303,7 +303,7 @@ def header():
         # Try to load the logo, fallback to text if it fails
         try:
             if os.path.exists(logo_path):
-                st.image(logo_path, width=200, use_container_width=False)
+                st.image(logo_path, width=200, width='content')
             else:
                 # Fallback to text logo
                 st.markdown(
@@ -321,7 +321,7 @@ def header():
         st.markdown('<h1 class="header-title" style="margin:0;">Pawan Customer Connector</h1>', unsafe_allow_html=True)
     with cols[2]:
         if st.session_state.get("view","home")!="home":
-            if st.button("← Back", key="back_btn", use_container_width=True):
+            if st.button("← Back", key="back_btn", width='stretched'):
                 st.session_state["view"]="home"
         st.caption(f"🔄 Deployed: {DEPLOYMENT_TIME}")
     st.markdown('<hr class="div"/>', unsafe_allow_html=True)
