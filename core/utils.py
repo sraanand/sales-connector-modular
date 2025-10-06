@@ -34,7 +34,31 @@ def parse_epoch_or_iso_to_local_date(s) -> date | None:
         try: return pd.to_datetime(s).date()
         except Exception: return None
 
-
+def parse_td_slot_time_prop(val) -> str:
+    """Parse HubSpot 'td_booking_slot_time' -> 'HH:MM' local if epoch, or normalize common strings."""
+    if val is None or (isinstance(val, float) and np.isnan(val)): return ""
+    s = str(val).strip()
+    if not s: return ""
+    if s.isdigit() and len(s) >= 10:
+        try:
+            return pd.to_datetime(int(s), unit="ms", utc=True).tz_convert(MEL_TZ).strftime("%H:%M")
+        except Exception:
+            pass
+    for fmt in ["%H:%M", "%I:%M %p", "%H:%M:%S"]:
+        try:
+            t = datetime.strptime(s, fmt).time()
+            return f"{t.hour:02d}:{t.minute:02d}"
+        except Exception:
+            continue
+    try:
+        ts = pd.to_datetime(s)
+        if isinstance(ts, pd.Timestamp):
+            if ts.tzinfo is None: ts = ts.tz_localize("UTC")
+            ts = ts.tz_convert(MEL_TZ)
+            return ts.strftime("%H:%M")
+    except Exception:
+        pass
+    return s
 
 # ---- normalize_phone ----
 
