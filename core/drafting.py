@@ -2,6 +2,7 @@
 from config import *
 import streamlit as st
 import pandas as pd
+from core.utils import *
 try:
     import openai
 except Exception:
