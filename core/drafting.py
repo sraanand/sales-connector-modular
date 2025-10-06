@@ -45,31 +45,60 @@ _init_openai()
 # ---- _call_openai ----
 
 def _call_openai(messages):
+    """
+    Call OpenAI and return the assistant's text, or "" on failure (to preserve your current contract).
+    - Trusts _openai_ok which is set by _init_openai() (env or st.secrets).
+    - Supports both new SDK (openai.chat.completions.create) and legacy (openai.ChatCompletion.create).
+    """
+    # IMPORTANT: do NOT check OPENAI_API_KEY here; it may be in st.secrets.
+    # Only rely on the initialiser and the SDK module being present.
     if not _openai_ok or openai is None:
-        st.info("OpenAI is not initialised. Check OPENAI_API_KEY in Secrets or requirements.")
+        # Optional: uncomment for visibility
+        # st.info("OpenAI not initialised (_openai_ok is False or SDK missing).")
         return ""
+
+    # Try the new SDK path first: openai.chat.completions.create(...)
     try:
         if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
             for model in PREFERRED_MODELS:
                 try:
-                    resp = openai.chat.completions.create(model=model, messages=messages, temperature=0.6, max_tokens=180)
-                    return resp.choices[0].message.content.strip()
+                    resp = openai.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.6,
+                        max_tokens=180,
+                    )
+                    # Correct: .content is already a string; no .str attribute
+                    txt = (resp.choices[0].message.content or "").strip()
+                    if txt:
+                        return txt
                 except Exception:
-                    continue
+                    continue  # try next model
     except Exception:
         pass
+
+    # Fallback: legacy SDK path openai.ChatCompletion.create(...)
     try:
         if hasattr(openai, "ChatCompletion"):
             for model in PREFERRED_MODELS:
                 try:
-                    resp = openai.ChatCompletion.create(model=model, messages=messages, temperature=0.6, max_tokens=180)
-                    return resp["choices"][0]["message"]["content"].strip()
+                    resp = openai.ChatCompletion.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.6,
+                        max_tokens=180,
+                        request_timeout=60,
+                    )
+                    txt = (resp["choices"][0]["message"]["content"] or "").strip()
+                    if txt:
+                        return txt
                 except Exception:
                     continue
     except Exception:
         pass
-    return ""
 
+    # If all attempts fail, preserve original contract and return empty string
+    return ""
 # ---- draft_sms_reminder ----
 
 def draft_sms_reminder(name: str, pairs_text: str, video_urls: str = "") -> str:
