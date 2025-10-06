@@ -10,6 +10,10 @@ import os
 def hs_headers() -> dict:
     return {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
 
+def stage_label(stage_id: str) -> str:
+    sid = str(stage_id or "")
+    return STAGE_LABELS.get(sid, sid or "")
+
 def _hs_token() -> str:
     """
     Resolve a HubSpot private app token from config or environment.
@@ -118,24 +122,112 @@ def _search_once(
 # ---- hs_get_deal_property_options ----
 
 def hs_get_deal_property_options(property_name: str) -> list[dict]:
+    """
+    Fetch selectable options for a HubSpot *deal* property, and return them as
+    a list of dicts shaped like: [{"label": "...", "value": "..."}, ...].
+
+    Typical use:
+      - For a dropdown in Streamlit where the choices should mirror HubSpot's
+        property options (e.g., a "State" or "Source" field on a deal).
+
+    Parameters
+    ----------
+    property_name : str
+        The internal name of the HubSpot deal property whose options we want.
+        Example: "customer_state" or "hs_deal_stage" or your custom property.
+
+    Returns
+    -------
+    list[dict]
+        A list of {"label": str, "value": str} dictionaries.
+        - "label" is what you would display to the user.
+        - "value" is the underlying option value stored in HubSpot.
+
+        If the live call fails (network error or unexpected payload), a
+        sensible fallback list of Australian state/territory codes is returned:
+        [{"label":"VIC","value":"VIC"}, ..., {"label":"ACT","value":"ACT"}]
+
+    External dependencies / config
+    ------------------------------
+    - HS_PROP_URL: base URL for HubSpot property metadata, e.g.
+        "https://api.hubapi.com/crm/v3/properties/deals"
+      This function appends "/{property_name}" to it.
+
+    - hs_headers(): function returning the HTTP headers including
+      Authorization (Bearer token) and Content-Type. It centralises auth so
+      we do not duplicate token handling here.
+
+    - requests: HTTP client library used to call HubSpot.
+
+    - st (Streamlit): used for user-friendly info messages when we fall back.
+
+    Why the fallback?
+    -----------------
+    - UX resilience: if HubSpot is down or the token is wrong, the app still
+      renders a drop-down with a default set of states rather than crashing.
+    - In your original app, this property was often a "state" selector; returning
+      the AU states is a reasonable last-resort default.
+
+    Error handling strategy
+    -----------------------
+    - r.raise_for_status(): raises on 4xx/5xx to quickly enter the except path.
+    - requests.exceptions.RequestException: captures all network/HTTP issues.
+    - Broad Exception: a final safety net for any JSON/shape issues.
+    - In both failure cases, we display a gentle Streamlit message and return
+      the fallback list.
+    """
+
+    # Pre-built fallback list if the HubSpot call fails or returns nothing.
+    # Shape matches what Streamlit select components typically expect.
     fallback_states = [{"label": s, "value": s} for s in ["VIC","NSW","QLD","SA","WA","TAS","NT","ACT"]]
+
     try:
+        # Construct the HubSpot API endpoint for this specific deal property.
+        # Example final URL:
+        #   https://api.hubapi.com/crm/v3/properties/deals/customer_state
         url = f"{HS_PROP_URL}/{property_name}"
+
+        # Perform a GET with standard auth headers.
+        # `archived=false` ensures we only receive currently-active options.
+        # Short timeout keeps the UI responsive on network issues.
         r = requests.get(url, headers=hs_headers(), params={"archived": "false"}, timeout=8)
+
+        # Raise an HTTPError if HubSpot returns 4xx/5xx.
+        # This sends us to the RequestException handler below.
         r.raise_for_status()
+
+        # Parse the JSON payload.
         data = r.json()
+
+        # HubSpot responds with an "options" array for enum/selection properties.
+        # If "options" is absent or None, we coerce to [] to simplify handling.
         options = data.get("options", []) or []
+
         out = []
         for opt in options:
+            # Each option typically has:
+            # - "value": machine value written to the property
+            # - "label": human-friendly label (sometimes "displayValue" instead)
             value = str(opt.get("value") or "").strip()
             label = str(opt.get("label") or opt.get("displayValue") or value).strip()
+
+            # Only keep options with a non-empty value.
+            # If label is empty, fall back to value so the UI still shows something.
             if value:
                 out.append({"label": label or value, "value": value})
+
+        # If HubSpot returned no usable options, fall back to AU states.
         return out or fallback_states
+
     except requests.exceptions.RequestException:
+        # Any network/HTTP-specific problem (timeouts, 401/403/404, etc.).
+        # We show a soft info message to the user and use the fallback list.
         st.info("Network issue while fetching state options. Using default states.")
         return fallback_states
+
     except Exception:
+        # Any other unexpected issue (e.g., JSON format changes).
+        # Keep the app functional with a gentle message + fallback.
         st.info("Unexpected issue while fetching state options. Using default states.")
         return fallback_states
 
@@ -599,3 +691,126 @@ def filter_deals_by_appointment_id_car_active_purchases(deals_df: pd.DataFrame) 
         dropped["Reason"] = "Car (via appointment_id) has another deal in active purchase stage"
     
     return kept, dropped
+
+def get_contact_note_ids(contact_id):
+    """
+    Fetch the list of HubSpot Note IDs that are *associated with a given contact*.
+
+    Behaviour (unchanged)
+    ---------------------
+    - Builds a direct HTTP GET to HubSpot's associations endpoint for notes.
+    - Uses a simple Bearer token header taken from HUBSPOT_TOKEN.
+    - If HTTP 200: parses the JSON and extracts each associated note's ID
+      (prefers 'toObjectId', falls back to 'id'), coerces to string.
+    - If HTTP status != 200 or any exception: returns [] (silent failure by design).
+
+    Why return [] on failure?
+    -------------------------
+    This mirrors the original function's "soft-fail" UX: upstream code can treat
+    a missing list as "no notes" without having to catch exceptions at every call site.
+
+    External dependencies expected in module scope
+    ----------------------------------------------
+    - HUBSPOT_TOKEN : str   (HubSpot private app token)
+    - HS_ROOT       : str   (e.g. "https://api.hubapi.com")
+    - requests      : module
+    - Optional: Streamlit/logging if you want to add diagnostics (kept out here).
+
+    Parameters
+    ----------
+    contact_id : str | int
+        HubSpot Contact ID whose associated Notes we want.
+
+    Returns
+    -------
+    list[str]
+        List of note IDs associated to this contact. Empty list on error or if none.
+
+    Endpoint details
+    ----------------
+    GET {HS_ROOT}/crm/v3/objects/contacts/{contact_id}/associations/notes
+      - Returns a JSON like:
+        {
+          "results": [
+            {"toObjectId": 12345, "type": "...", ...},
+            ...
+          ]
+        }
+      - Some payloads may use "id" instead of "toObjectId"; we try both.
+    """
+    # Build standard Bearer token headers (no Content-Type needed for GET).
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
+
+    try:
+        # Construct the associations endpoint for contact -> notes
+        url = f"{HS_ROOT}/crm/v3/objects/contacts/{contact_id}/associations/notes"
+
+        # Keep a practical timeout so the UI does not hang indefinitely.
+        response = requests.get(url, headers=headers, timeout=25)
+
+        # Soft-check status: do NOT raise; mirror original behaviour of returning [] on non-200.
+        if response.status_code == 200:
+            data = response.json() or {}
+            results = data.get("results", []) or []
+
+            # Extract an ID from each association object.
+            # Prefer 'toObjectId'; some shapes might carry 'id' instead.
+            note_ids = [res.get("toObjectId") or res.get("id") for res in results]
+
+            # Coerce to strings and drop falsy values.
+            return [str(nid) for nid in note_ids if nid]
+        else:
+            # Non-200 → treat as "no notes" per original contract.
+            return []
+
+    except Exception:
+        # Network error, JSON decode error, etc. → silent soft-fail to [].
+        return []
+
+
+def get_notes_content(note_ids):
+    """Get note content"""
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
+    if not note_ids:
+        return []
+    
+    try:
+        url = f"{HS_ROOT}/crm/v3/objects/notes/batch/read"
+        payload = {
+            "properties": ["hs_note_body", "hs_timestamp", "hs_createdate", "hubspot_owner_id"],
+            "inputs": [{"id": str(note_id)} for note_id in note_ids]
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=25)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("results", [])
+        else:
+            return []
+    except:
+        return []
+
+
+def get_owner_name(owner_id):
+    """Get owner name"""
+    headers = {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
+    if not owner_id:
+        return "Unknown User"
+    
+    try:
+        url = f"{HS_ROOT}/crm/v3/owners/{owner_id}"
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            first_name = data.get("firstName", "")
+            last_name = data.get("lastName", "")
+            if first_name or last_name:
+                return f"{first_name} {last_name}".strip()
+            else:
+                return data.get("email", f"User {owner_id}")
+        else:
+            return f"User {owner_id}"
+    except:
+        return f"User {owner_id}"
