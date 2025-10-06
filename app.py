@@ -321,7 +321,7 @@ def header():
         st.markdown('<h1 class="header-title" style="margin:0;">Pawan Customer Connector</h1>', unsafe_allow_html=True)
     with cols[2]:
         if st.session_state.get("view","home")!="home":
-            if st.button("← Back", key="back_btn", width='stretched'):
+            if st.button("← Back", key="back_btn", width='stretch'):
                 st.session_state["view"]="home"
         st.caption(f"🔄 Deployed: {DEPLOYMENT_TIME}")
     st.markdown('<hr class="div"/>', unsafe_allow_html=True)
