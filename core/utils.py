@@ -16,7 +16,9 @@ def mel_day_bounds_to_epoch_ms(d: date) -> tuple[int, int]:
     end_ms      = int(end_local.astimezone(UTC_TZ).timestamp() * 1000)
     return start_ms, end_ms
 
-
+def stage_label(stage_id: str) -> str:
+    sid = str(stage_id or "")
+    return STAGE_LABELS.get(sid, sid or "")
 
 # ---- parse_epoch_or_iso_to_local_date ----
 
