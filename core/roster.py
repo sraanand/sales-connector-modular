@@ -215,3 +215,71 @@ def round_robin_assign(dedup_df: pd.DataFrame, associates: List[Dict[str, str]],
     work["SalesAssociate"] = names
     work["SalesEmail"] = emails
     return work
+
+# core/roster.py (append these helpers)
+
+def _safe_get_sa_email() -> str:
+    try:
+        info = st.secrets.get("gcp_service_account")
+        return (info or {}).get("client_email", "")
+    except Exception:
+        return ""
+
+def debug_dump_roster(sheet_url: str, roster_df: pd.DataFrame, target_date: date, worksheet_name: str | None = None):
+    """
+    Streamlit-friendly diagnostics for the roster pipeline.
+    Shows:
+      - Auth method (service account present / not)
+      - Raw header row (if gspread path works)
+      - Normalised columns + head()
+      - Weekday column chosen for 'target_date' and who is 'True'
+    """
+    st.markdown("### 🛠 Roster debug")
+
+    # Auth / SA email
+    sa_email = _safe_get_sa_email()
+    st.write({
+        "service_account_present": bool(sa_email),
+        "service_account_email": sa_email,
+        "gspread_imported": gspread is not None,
+    })
+
+    # Try to show raw header row via gspread (if possible)
+    try:
+        client = _get_gspread_client()
+        if client is not None:
+            sh = client.open_by_url(sheet_url)
+            ws = sh.worksheet(worksheet_name) if worksheet_name else sh.sheet1
+            raw = ws.get_all_values()
+            raw_header = raw[0] if raw else []
+            st.write({"raw_header_row": raw_header})
+        else:
+            st.info("gspread client not available (using CSV fallback or empty).")
+            # FYI CSV URL
+            if "/edit" in sheet_url:
+                csv_url = sheet_url.split("/edit", 1)[0] + "/export?format=csv"
+                st.code(csv_url, language="text")
+    except Exception as e:
+        st.warning(f"Could not fetch raw header row via gspread: {e}")
+
+    # Normalised DF overview
+    st.write({
+        "roster_shape": roster_df.shape if roster_df is not None else (0, 0),
+        "roster_columns": list(roster_df.columns) if roster_df is not None else [],
+    })
+    if roster_df is not None and not roster_df.empty:
+        st.dataframe(roster_df.head(20), use_container_width=True)
+
+    # Which weekday column for the selected date?
+    weekday_col = _weekday_col_for(target_date)
+    st.write({"target_date": str(target_date), "weekday_col": weekday_col})
+
+    # Show who is available for that day
+    if roster_df is not None and not roster_df.empty:
+        if weekday_col in roster_df.columns:
+            true_count = int(roster_df[weekday_col].sum())
+            st.write({"available_count": true_count})
+            st.dataframe(roster_df.loc[roster_df[weekday_col] == True, ["name", "email"]], use_container_width=True)
+        else:
+            st.error(f"Column for weekday '{weekday_col}' not found in roster. "
+                     f"Expected day columns like Mon..Sun in columns C..I.")
