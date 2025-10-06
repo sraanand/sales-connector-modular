@@ -50,3 +50,8 @@ STAGE_LABELS = {
     STAGE_CONDUCTED_ID: "TD conducted (no deposit)",
 }
 PRIMARY = "#4736FE"
+
+try:
+    DEPLOYMENT_TIME
+except NameError:
+    DEPLOYMENT_TIME = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")

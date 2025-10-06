@@ -5,6 +5,7 @@ from workflows.reminders import view_reminders
 from workflows.manager import view_manager
 from workflows.old_leads import view_old
 from workflows.unsold_summary import view_unsold_summary
+from config import *
 
 st.set_page_config(
     page_title="Pawan Customer Connector", 
