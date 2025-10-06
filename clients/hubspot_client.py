@@ -10,10 +10,6 @@ import os
 def hs_headers() -> dict:
     return {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
 
-def stage_label(stage_id: str) -> str:
-    sid = str(stage_id or "")
-    return STAGE_LABELS.get(sid, sid or "")
-
 def _hs_token() -> str:
     """
     Resolve a HubSpot private app token from config or environment.
