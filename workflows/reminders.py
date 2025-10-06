@@ -34,7 +34,7 @@ def view_reminders():
         st.markdown("</div>", unsafe_allow_html=True)
 
     if go:
-        st.markdown("<span style='background:#4436F5;color:#FFFFFF;padding:4px 8px;border-radius:6px;'>Searching HubSpot…</span>", unsafe_allow_html=True)
+        st.markdown("<span style='background:#4736FE;color:#FFFFFF;padding:4px 8px;border-radius:6px;'>Searching HubSpot…</span>", unsafe_allow_html=True)
         eq_ms, _ = mel_day_bounds_to_epoch_ms(rem_date)
         raw = hs_search_deals_by_date_property(
             pipeline_id=PIPELINE_ID, stage_id=STAGE_BOOKED_ID, state_value=rem_state_val,
