@@ -8,6 +8,39 @@ try:
 except Exception:
     openai=None
 
+# --- OpenAI initialisation (safe and optional) ---
+import os
+import streamlit as st
+
+try:
+    import openai
+except Exception:
+    openai = None  # SDK not installed
+    pass
+
+# Global flag used across the app to decide whether to call OpenAI or skip
+_openai_ok = False
+
+def _init_openai():
+    """
+    Initialise OpenAI once and set _openai_ok accordingly.
+    - Reads key from env or Streamlit Secrets.
+    - Works even if the SDK is missing (keeps _openai_ok = False).
+    """
+    global _openai_ok
+    try:
+        # Try both env and Streamlit Cloud Secrets
+        key = os.getenv("OPENAI_API_KEY") or (st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else "")
+        if not key or openai is None:
+            _openai_ok = False
+            return
+        openai.api_key = key
+        _openai_ok = True
+    except Exception:
+        _openai_ok = False
+
+# Do the one-time init on import
+_init_openai()
 
 # ---- _call_openai ----
 
