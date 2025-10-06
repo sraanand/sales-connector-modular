@@ -526,3 +526,76 @@ def hs_batch_read_deals(deal_ids: list[str], props: list[str]) -> dict[str, dict
 # ============ Aircall ============
 
 
+def filter_deals_by_appointment_id_car_active_purchases(deals_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Filter out deals where other deals with the same appointment_id have active purchase stages.
+    This works by:
+    1. Getting the appointment_id for each deal
+    2. Finding all other deals with the same appointment_id  
+    3. Checking if any of those other deals have active purchase stages
+    4. Excluding the original deal if so
+    """
+    if deals_df is None or deals_df.empty:
+        return deals_df.copy() if isinstance(deals_df, pd.DataFrame) else pd.DataFrame(), pd.DataFrame()
+    
+    # Get deal IDs
+    deal_ids = deals_df.get("hs_object_id", pd.Series(dtype=str)).dropna().astype(str).tolist()
+    if not deal_ids:
+        return deals_df.copy(), pd.DataFrame()
+    
+    # Get appointment_id for each deal
+    deal_appointment_map = {}
+    deal_data = hs_batch_read_deals(deal_ids, props=["appointment_id"])
+    
+    for deal_id in deal_ids:
+        props = deal_data.get(deal_id, {})
+        appointment_id = props.get("appointment_id")
+        if appointment_id:
+            deal_appointment_map[deal_id] = str(appointment_id).strip()
+    
+    if not deal_appointment_map:
+        return deals_df.copy(), pd.DataFrame()
+    
+    # For each unique appointment_id, find all deals with that appointment_id
+    appointment_ids = set(deal_appointment_map.values())
+    
+    # Get all deals for each appointment_id and check their stages
+    deals_to_exclude = set()
+    
+    for appointment_id in appointment_ids:
+        # Get all deals with this appointment_id
+        all_deals_for_appointment = get_deals_by_appointment_id(appointment_id)
+        
+        # Get stages for all these deals
+        if all_deals_for_appointment:
+            stage_data = hs_batch_read_deals(all_deals_for_appointment, props=["dealstage"])
+            
+            # Check if any deal (other than our original ones) has active purchase stage
+            has_active_purchase = False
+            for check_deal_id in all_deals_for_appointment:
+                if check_deal_id in deal_ids:
+                    continue  # Skip our original deals
+                
+                stage = (stage_data.get(check_deal_id, {}) or {}).get("dealstage")
+                
+                if stage and str(stage) in ACTIVE_PURCHASE_STAGE_IDS:
+                    has_active_purchase = True
+                    break
+            
+            # If any other deal has active purchase stage, exclude all our original deals with this appointment_id
+            if has_active_purchase:
+                for deal_id, deal_appointment in deal_appointment_map.items():
+                    if deal_appointment == appointment_id:
+                        deals_to_exclude.add(deal_id)
+    
+    # Filter the dataframe
+    work = deals_df.copy()
+    work["__keep"] = work["hs_object_id"].apply(lambda x: str(x) not in deals_to_exclude)
+    
+    dropped = work[~work["__keep"]].drop(columns=["__keep"]).copy()
+    kept = work[work["__keep"]].drop(columns=["__keep"]).copy()
+    
+    if not dropped.empty:
+        dropped["Reason"] = "Car (via appointment_id) has another deal in active purchase stage"
+    
+    return kept, dropped
