@@ -46,6 +46,7 @@ _init_openai()
 
 def _call_openai(messages):
     if not _openai_ok or openai is None:
+        st.info("OpenAI is not initialised. Check OPENAI_API_KEY in Secrets or requirements.")
         return ""
     try:
         if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
