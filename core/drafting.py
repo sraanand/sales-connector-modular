@@ -70,37 +70,6 @@ def _call_openai(messages):
         pass
     return ""
 
-
-
-# ---- _call_openai ----
-
-def _call_openai(messages):
-    if not _openai_ok or not OPENAI_API_KEY or openai is None:
-        return ""
-    try:
-        if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
-            for model in PREFERRED_MODELS:
-                try:
-                    resp = openai.chat.completions.create(model=model, messages=messages, temperature=0.6, max_tokens=180)
-                    return resp.choices[0].message.content.strip()
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    try:
-        if hasattr(openai, "ChatCompletion"):
-            for model in PREFERRED_MODELS:
-                try:
-                    resp = openai.ChatCompletion.create(model=model, messages=messages, temperature=0.6, max_tokens=180)
-                    return resp["choices"][0]["message"]["content"].strip()
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return ""
-
-
-
 # ---- draft_sms_reminder ----
 
 def draft_sms_reminder(name: str, pairs_text: str, video_urls: str = "") -> str:
