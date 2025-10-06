@@ -45,7 +45,7 @@ _init_openai()
 # ---- _call_openai ----
 
 def _call_openai(messages):
-    if not _openai_ok or not OPENAI_API_KEY or openai is None:
+    if not _openai_ok or openai is None:
         return ""
     try:
         if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
