@@ -55,3 +55,10 @@ try:
     DEPLOYMENT_TIME
 except NameError:
     DEPLOYMENT_TIME = datetime.now(ZoneInfo("Australia/Melbourne")).strftime("%Y-%m-%d %H:%M:%S")
+
+# Ensure the flag exists even if drafting module has not been imported yet
+try:
+    _openai_ok
+except NameError:
+    _openai_ok = False
+
