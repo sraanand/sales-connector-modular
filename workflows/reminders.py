@@ -6,6 +6,7 @@ from clients.hubspot_client import *
 from clients.aircall_client import *
 from core.utils import *
 from core.drafting import *
+from core.roster import *
 from ui.components import *
 import streamlit as st
 import pandas as pd
@@ -55,12 +56,79 @@ def view_reminders():
         # 4) Audit dedupe
         dedup, dedupe_dropped = dedupe_users_with_audit(deals_f, use_conducted=False)
 
+        # --- ROSTER: load, filter by availability, assign round-robin ---
+
+        # a) Load the roster (one-time per run; cache if you want with st.cache_data)
+        ROSTER_URL = "https://docs.google.com/spreadsheets/d/1-9Ax-7GUymChhKaRXAyCxBG7oDNJ9wqBlxcZivzz8Ic/edit?usp=sharing"
+        roster_df = load_roster_df(ROSTER_URL)  # uses Service Account secrets or CSV fallback
+
+        # b) Determine the target date for reminders (the form's rem_date)
+        today_mel = datetime.now(MEL_TZ).date()  # or use 'rem_date' if that’s the send date
+        target_date = rem_date if 'rem_date' in locals() else today_mel
+
+        # c) Pick associates available on target_date
+        avail = available_associates_for_date(roster_df, target_date)
+
+        if not avail:
+            st.warning("No sales associates marked available for the selected date. SMS will be generic.")
+            # Proceed without assignment: dedup remains unchanged; message drafts will fall back to your existing function.
+        else:
+            # d) Assign round-robin and attach SalesAssociate / SalesEmail
+            dedup = round_robin_assign(dedup, avail, target_date)
+
         # 5) Build messages with audit
-        msgs, skipped_msgs = build_messages_with_audit(dedup, mode="reminder")
+        # --- Build messages with associate personalisation (Reminders only) ---
+        if dedup is None or dedup.empty:
+            msgs = pd.DataFrame(columns=["CustomerName","Phone","Email","SalesAssociate","Cars","WhenExact","WhenRel","DealStages","Message"])
+            skipped_msgs = pd.DataFrame(columns=["Customer","Email","Cars","Reason"])
+        else:
+            out_rows = []
+            skipped = []
+            for _, row in dedup.iterrows():
+                phone = str(row.get("Phone") or "").strip()
+                if not phone:
+                    skipped.append({
+                        "Customer": str(row.get("CustomerName") or ""),
+                        "Email": str(row.get("Email") or ""),
+                        "Cars": str(row.get("Cars") or ""),
+                        "Reason": "Missing/invalid phone"
+                    })
+                    continue
+
+                name  = str(row.get("CustomerName") or "").strip()
+                cars  = str(row.get("Cars") or "").strip()
+                when_rel = str(row.get("WhenRel") or "").strip()
+                pairs_text = build_pairs_text(cars, when_rel)
+
+                video_urls = str(row.get("VideoURLs") or "").strip()
+                associate_name = str(row.get("SalesAssociate") or "").strip()
+
+                if associate_name:
+                    # Personalised, associate-signed reminder
+                    msg = draft_sms_reminder_associate(name, pairs_text, associate_name, video_urls)
+                else:
+                    # Fallback to your original generic reminder function (if no associates available)
+                    msg = draft_sms_reminder(name, pairs_text, video_urls)
+
+                out_rows.append({
+                    "CustomerName": name,
+                    "Phone": phone,
+                    "Email": str(row.get("Email") or "").strip(),
+                    "SalesAssociate": associate_name,   # NEW
+                    "Cars": cars,
+                    "WhenExact": str(row.get("WhenExact") or ""),
+                    "WhenRel": when_rel,
+                    "DealStages": str(row.get("DealStages") or ""),
+                    "Message": msg
+                })
+
+            msgs = pd.DataFrame(out_rows, columns=["CustomerName","Phone","Email","SalesAssociate","Cars","WhenExact","WhenRel","DealStages","Message"])
+            skipped_msgs = pd.DataFrame(skipped, columns=["Customer","Email","Cars","Reason"])
+
 
         # Store all artifacts
         st.session_state["reminders_deals"] = deals_f
-        st.session_state["reminders_removed_sms_sent"] = removed_sms_sent  # NEW
+        st.session_state["reminders_removed_sms_sent"] = removed_sms_sent
         st.session_state["reminders_dropped_car_purchases"] = dropped_car_purchases
         st.session_state["reminders_removed_internal"] = removed_internal
         st.session_state["reminders_dedup"] = dedup
@@ -80,6 +148,7 @@ def view_reminders():
     dedupe_drop  = st.session_state.get("reminders_dedupe_dropped")
     msgs         = st.session_state.get("reminders_msgs")
     skipped_msgs = st.session_state.get("reminders_skipped_msgs")
+
 
     # NEW: Show SMS already sent filter results FIRST
     if isinstance(removed_sms, pd.DataFrame) and not removed_sms.empty:
@@ -126,46 +195,85 @@ def view_reminders():
             st.markdown("**Skipped while creating SMS**")
             st.dataframe(skipped_msgs, use_container_width=True)
 
-        # MODIFIED: Send SMS button with deal update functionality
-        if not edited.empty and st.button("Send SMS"):
-            to_send = edited[edited["Send"]]
-            if to_send.empty:
-                st.warning("No rows selected.")
-            elif not (AIRCALL_ID and AIRCALL_TOKEN and AIRCALL_NUMBER_ID):
-                st.error("Missing Aircall credentials in .env.")
-            else:
-                st.info("Sending messages…")
-                sent, failed = 0, 0
-                sent_phones = []  # Track which phones were sent successfully
-                
-                for _, r in to_send.iterrows():
-                    ok, msg = send_sms_via_aircall(r["Phone"], r["SMS draft"], AIRCALL_NUMBER_ID)
-                    if ok: 
-                        sent += 1
-                        sent_phones.append(r["Phone"])
-                        st.success(f"✅ Sent to {r['Phone']}")
-                    else:  
-                        failed += 1
-                        st.error(f"❌ Failed for {r['Phone']}: {msg}")
-                    time.sleep(1)
-                
-                # NEW: Update deals in HubSpot after successful sends
-                if sent_phones and st.session_state.get("reminders_phone_to_deals"):
-                    st.info("Updating HubSpot deals...")
-                    phone_to_deals = st.session_state["reminders_phone_to_deals"]
-                    
-                    all_deal_ids = []
-                    for phone in sent_phones:
-                        if phone in phone_to_deals:
-                            all_deal_ids.extend(phone_to_deals[phone])
-                    
-                    if all_deal_ids:
-                        update_success, update_fail = update_deals_sms_sent(all_deal_ids)
-                        if update_success > 0:
-                            st.success(f"✅ Updated {update_success} deals with SMS sent status")
-                        if update_fail > 0:
-                            st.warning(f"⚠️ Failed to update {update_fail} deals")
-                
-                if sent: st.balloons()
-                st.success(f"🎉 Done! SMS Sent: {sent} | Failed: {failed}")
+    # --- SEND: SMS + update HubSpot ticket_owner ---
+    # NOTE: change the button CTA label as requested
+    if not edited.empty and st.button("Send SMS and update HS"):
+        to_send = edited[edited["Send"]]
 
+        if to_send.empty:
+            st.warning("No rows selected.")
+        elif not (AIRCALL_ID and AIRCALL_TOKEN and AIRCALL_NUMBER_ID):
+            st.error("Missing Aircall credentials in .env.")
+        else:
+            # We will:
+            # 1) send SMS per selected row
+            # 2) collect phones that were actually sent
+            # 3) map those phones -> deal_ids (from session)
+            # 4) map each deal_id -> the associate's SalesEmail from msgs
+            # 5) batch update 'ticket_owner' in HubSpot
+
+            st.info("Sending messages…")
+            sent_phones: list[str] = []
+            sent, failed = 0, 0
+
+            # Build a quick lookup from phone -> SalesEmail from the 'msgs' DF
+            # (Assumes you included 'SalesEmail' in msgs when you built it.)
+            phone_to_sales_email = {}
+            if "SalesEmail" in msgs.columns:
+                # If there could be duplicates, the first is fine; all rows for that phone
+                # should have the same SalesEmail because of round-robin assignment.
+                grouper = msgs.groupby("Phone", dropna=False)["SalesEmail"].first()
+                phone_to_sales_email = grouper.to_dict()
+
+            for _, r in to_send.iterrows():
+                phone = str(r["Phone"]).strip()
+
+                # Body is editable in the table, so we use the edited text
+                body = str(r["SMS draft"]).strip()
+
+                ok, msg = send_sms_via_aircall(phone, body, AIRCALL_NUMBER_ID)
+                if ok:
+                    sent += 1
+                    sent_phones.append(phone)
+                    st.success(f"✅ Sent to {phone}")
+                else:
+                    failed += 1
+                    st.error(f"❌ Failed for {phone}: {msg}")
+
+                time.sleep(1)
+
+            # === HubSpot ticket_owner update (ONLY for phones that actually got an SMS) ===
+            # Build deal_id -> associate_email map.
+            # We use the phone -> [deal_ids] mapping persisted earlier in session state.
+            phone_to_deals = st.session_state.get("reminders_phone_to_deals") or {}
+            deal_to_email: dict[str, str] = {}
+
+            # You told us the sheet layout is strict:
+            #  A: email (we already carried this as SalesEmail)
+            #  B: nickname (displayed as SalesAssociate)
+            #  C..I: Mon..Sun availability
+            # Given that, we trust 'SalesEmail' in msgs for the correct HubSpot owner value.
+            for phone in sent_phones:
+                sales_email = phone_to_sales_email.get(phone, "").strip()
+                if not sales_email:
+                    # If for any reason SalesEmail didn't come through, skip updating HS for this phone.
+                    # (Optionally warn so you can fix roster mapping.)
+                    st.warning(f"⚠️ No SalesEmail found for {phone}; skipping HubSpot owner update.")
+                    continue
+
+                # Update ALL deals tied to that phone (you created this map earlier)
+                for did in phone_to_deals.get(phone, []):
+                    deal_to_email[str(did)] = sales_email
+
+            # Perform one or more batch updates (100 per chunk handled inside helper)
+            if deal_to_email:
+                st.info("Updating HubSpot ticket owners…")
+                u_ok, u_fail = hs_update_ticket_owner_map(deal_to_email)
+                if u_ok:
+                    st.success(f"✅ Updated 'ticket_owner' on {u_ok} deal(s)")
+                if u_fail:
+                    st.warning(f"⚠️ Failed to update 'ticket_owner' on {u_fail} deal(s)")
+
+            if sent:
+                st.balloons()
+            st.success(f"🎉 Done! SMS Sent: {sent} | Failed: {failed}")
