@@ -3,44 +3,62 @@ from config import *
 import streamlit as st
 import pandas as pd
 from core.utils import *
-try:
-    import openai
-except Exception:
-    openai=None
+import os
 
 # --- OpenAI initialisation (safe and optional) ---
-import os
-import streamlit as st
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 try:
     import openai
 except Exception:
     openai = None  # SDK not installed
-    pass
+
 
 # Global flag used across the app to decide whether to call OpenAI or skip
 _openai_ok = False
+_openai_mode = "none"
 
 def _init_openai():
-    """
-    Initialise OpenAI once and set _openai_ok accordingly.
-    - Reads key from env or Streamlit Secrets.
-    - Works even if the SDK is missing (keeps _openai_ok = False).
-    """
-    global _openai_ok
-    try:
-        # Try both env and Streamlit Cloud Secrets
-        key = os.getenv("OPENAI_API_KEY") or (st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else "")
-        if not key or openai is None:
-            _openai_ok = False
+    """Initialise OpenAI once. Prefer new client; fall back to legacy. Read key from env or st.secrets."""
+    global _openai_ok, _openai_mode
+    key = OPENAI_API_KEY
+    if not key and hasattr(st, "secrets"):
+        try:
+            key = st.secrets.get("OPENAI_API_KEY")
+        except Exception:
+            key = None
+
+    if not key:
+        _openai_ok, _openai_mode = False, "none"
+        return
+
+    # Prefer new client if available
+    if OpenAI is not None:
+        try:
+            os.environ["OPENAI_API_KEY"] = key
+            _ = OpenAI()  # smoke test
+            _openai_ok, _openai_mode = True, "new"
             return
-        openai.api_key = key
-        _openai_ok = True
-    except Exception:
-        _openai_ok = False
+        except Exception:
+            pass
+
+    # Fallback to legacy module
+    if openai is not None:
+        try:
+            openai.api_key = key
+            _openai_ok, _openai_mode = True, "legacy"
+            return
+        except Exception:
+            pass
+
+    _openai_ok, _openai_mode = False, "none"
 
 # Do the one-time init on import
 _init_openai()
+
 
 # ---- _call_openai ----
 
@@ -52,53 +70,48 @@ def _call_openai(messages):
     """
     # IMPORTANT: do NOT check OPENAI_API_KEY here; it may be in st.secrets.
     # Only rely on the initialiser and the SDK module being present.
-    if not _openai_ok or openai is None:
-        # Optional: uncomment for visibility
-        # st.info("OpenAI not initialised (_openai_ok is False or SDK missing).")
+    if not _openai_ok or (OpenAI is None and openai is None):
+        # Optional: st.info("OpenAI not initialised; check OPENAI_API_KEY and requirements.")
         return ""
 
-    # Try the new SDK path first: openai.chat.completions.create(...)
-    try:
-        if hasattr(openai, "chat") and hasattr(openai.chat, "completions"):
-            for model in PREFERRED_MODELS:
-                try:
-                    resp = openai.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.6,
-                        max_tokens=180,
-                    )
-                    # Correct: .content is already a string; no .str attribute
-                    txt = (resp.choices[0].message.content or "").strip()
-                    if txt:
-                        return txt
-                except Exception:
-                    continue  # try next model
-    except Exception:
-        pass
 
-    # Fallback: legacy SDK path openai.ChatCompletion.create(...)
-    try:
-        if hasattr(openai, "ChatCompletion"):
-            for model in PREFERRED_MODELS:
-                try:
-                    resp = openai.ChatCompletion.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.6,
-                        max_tokens=180,
-                        request_timeout=60,
-                    )
-                    txt = (resp["choices"][0]["message"]["content"] or "").strip()
-                    if txt:
-                        return txt
-                except Exception:
-                    continue
-    except Exception:
-        pass
+    # ---- Preferred: new client path (>=1.x) ----
+    if _openai_mode == "new" and OpenAI is not None:
+        client = OpenAI()
+        for model in PREFERRED_MODELS:
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.6,
+                    max_tokens=180,
+                )
+                txt = (resp.choices[0].message.content or "").strip()  # <-- correct (no .str)
+                if txt:
+                    return txt
+            except Exception:
+                continue
 
-    # If all attempts fail, preserve original contract and return empty string
+    # ---- Fallback: legacy module path ----
+    if _openai_mode == "legacy" and openai is not None and hasattr(openai, "ChatCompletion"):
+        for model in PREFERRED_MODELS:
+            try:
+                resp = openai.ChatCompletion.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.6,
+                    max_tokens=180,
+                    request_timeout=60,
+                )
+                txt = (resp["choices"][0]["message"]["content"] or "").strip()
+                if txt:
+                    return txt
+            except Exception:
+                continue
+
+    # As per your original contract, return empty string on failure
     return ""
+    
 # ---- draft_sms_reminder ----
 
 def draft_sms_reminder(name: str, pairs_text: str, video_urls: str = "") -> str:
