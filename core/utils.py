@@ -286,3 +286,78 @@ def dedupe_users(df: pd.DataFrame, *, use_conducted: bool) -> pd.DataFrame:
     return out[want] if not out.empty else out
 
 
+def _coerce_to_utc_datetime(value):
+    """
+    Best-effort parser that accepts:
+      - epoch milliseconds (13 digits) or seconds (10 digits)
+      - ISO 8601 strings (e.g. '2024-08-01T03:45:00Z' or without 'Z')
+    Returns an aware datetime in UTC, or None if parsing fails.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+
+    # Try numeric (epoch seconds / ms)
+    try:
+        # allow strings like "1690896300000" too
+        s = str(value).strip()
+        if s.replace(".", "", 1).isdigit():
+            num = float(s)
+            # Heuristic: >= 1e12 ⇒ milliseconds
+            if num >= 1e12:
+                ts = num / 1000.0
+            else:
+                ts = num
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
+        pass
+
+    # Try ISO via pandas (handles many formats)
+    try:
+        ts = pd.to_datetime(value, utc=True, errors="coerce")
+        if isinstance(ts, pd.Timestamp) and pd.notna(ts):
+            return ts.to_pydatetime()  # already UTC from utc=True
+    except Exception:
+        pass
+
+    return None
+
+
+def parse_epoch_or_iso_to_local_time(value, tz=None, *, as_str=True, fmt="%I:%M %p"):
+    """
+    Convert epoch ms/seconds or ISO string to a Melbourne-local time-of-day.
+    - tz: optional ZoneInfo; defaults to Australia/Melbourne
+    - as_str=True: returns a string like '09:30 AM'
+      as_str=False: returns a timezone-aware datetime (local) for further use
+    """
+    if tz is None:
+        try:
+            tz = MEL_TZ  # provided by config.py in this project
+        except NameError:
+            tz = ZoneInfo("Australia/Melbourne")
+
+    dt_utc = _coerce_to_utc_datetime(value)
+    if not dt_utc:
+        return "" if as_str else None
+
+    local_dt = dt_utc.astimezone(tz)
+    return local_dt.strftime(fmt) if as_str else local_dt
+
+
+def parse_epoch_or_iso_to_local_datetime(value, tz=None, *, as_str=False, fmt="%d/%m/%Y %I:%M %p"):
+    """
+    Like the function above, but returns the full local datetime.
+    - as_str=False: returns timezone-aware datetime
+    - as_str=True:  returns formatted 'DD/MM/YYYY HH:MM AM/PM'
+    """
+    if tz is None:
+        try:
+            tz = MEL_TZ
+        except NameError:
+            tz = ZoneInfo("Australia/Melbourne")
+
+    dt_utc = _coerce_to_utc_datetime(value)
+    if not dt_utc:
+        return "" if as_str else None
+
+    local_dt = dt_utc.astimezone(tz)
+    return local_dt.strftime(fmt) if as_str else local_dt
