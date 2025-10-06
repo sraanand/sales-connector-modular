@@ -62,6 +62,17 @@ def view_reminders():
         # a) Load the roster (one-time per run; cache if you want with st.cache_data)
         ROSTER_URL = "https://docs.google.com/spreadsheets/d/1-9Ax-7GUymChhKaRXAyCxBG7oDNJ9wqBlxcZivzz8Ic/edit?usp=sharing"
         roster_df = load_roster_df(ROSTER_URL)  # uses Service Account secrets or CSV fallback
+        target_date = rem_date   # or whatever you set as the intended day
+        avail = available_associates_for_date(roster_df, target_date)
+
+        debug_roster = st.checkbox("Debug roster", value=False)
+
+        # ... after you compute roster_df, target_date, avail:
+        if debug_roster:
+            from core.roster import debug_dump_roster  # import inside to avoid circulars
+            debug_dump_roster(ROSTER_URL, roster_df, target_date)
+            # Also show what 'avail' resolved to:
+            st.write({"available_associates": avail})
 
         # b) Determine the target date for reminders (the form's rem_date)
         today_mel = datetime.now(MEL_TZ).date()  # or use 'rem_date' if that’s the send date
@@ -76,6 +87,13 @@ def view_reminders():
         else:
             # d) Assign round-robin and attach SalesAssociate / SalesEmail
             dedup = round_robin_assign(dedup, avail, target_date)
+
+        if avail:
+            dedup = round_robin_assign(dedup, avail, target_date)
+            if debug_roster:
+                st.write("Assignment counts per associate:")
+                if "SalesAssociate" in dedup.columns:
+                    st.dataframe(dedup["SalesAssociate"].value_counts().to_frame("Leads"), use_container_width=True)
 
         # 5) Build messages with audit
         # --- Build messages with associate personalisation (Reminders only) ---
