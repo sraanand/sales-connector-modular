@@ -1,0 +1,6 @@
+streamlit>=1.34
+requests
+pandas
+numpy
+python-dotenv
+openai
