@@ -81,38 +81,109 @@ def _search_once(
     endpoint: str = "/crm/v3/objects/deals/search"
 ) -> pd.DataFrame:
     """
-    Execute a HubSpot CRM search with safe pagination and return a flat DataFrame
-    of 'properties' plus 'id'. This mirrors the monolith's private helper.
+    Execute a HubSpot CRM **search** with cursor-based pagination, collect up to
+    `total_cap` results, and return them as a **flat DataFrame** containing each
+    deal's `properties` plus its HubSpot `id`.
+
+    Why this helper exists
+    ----------------------
+    HubSpot's search API returns results in **pages** and includes a cursor
+    (`paging.next.after`) to fetch more pages. This helper loops through those
+    pages for you and enforces a **hard upper bound** (`total_cap`) so callers
+    cannot accidentally pull an unbounded volume.
+
+    What this function assumes
+    --------------------------
+    - `_hs_post(endpoint, body)` exists and performs the HTTP POST to HubSpot,
+      handling headers/auth and (ideally) raising or surfacing HTTP errors.
+    - `payload` already includes your **filterGroups**, **sorts**, **properties**,
+      etc., compatible with HubSpot's CRM Search API for deals.
+
+    Parameters
+    ----------
+    payload : dict
+        The HubSpot search body. If you pass a `limit` here, we respect it per page,
+        but we will still clamp it to ensure we never exceed `total_cap`.
+    total_cap : int, default 1000
+        Hard maximum number of **rows** to fetch **across all pages**.
+        (Prevents runaway pagination.)
+    endpoint : str, default "/crm/v3/objects/deals/search"
+        Search endpoint path. You can switch it if you reuse this helper for other
+        objects (e.g., contacts) by pointing at another CRM search endpoint.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per returned object with **flattened properties** and its `"id"`.
+        If no results are found, returns an **empty** DataFrame (0 rows).
+
+    Notes on limits & pagination
+    ----------------------------
+    - HubSpot returns JSON like:
+        {
+          "results": [ {"id":"123","properties":{...}}, ... ],
+          "paging":  { "next": { "after": "cursor-token" } }
+        }
+    - We loop while `paging.next.after` is present and until `fetched >= total_cap`.
+    - We make a **shallow copy** of `payload` each page so the caller's dict is not
+      mutated. We inject `"after"` into that per-page copy when continuing.
+
+    Error handling
+    --------------
+    - Network/HTTP handling is delegated to `_hs_post`. If `_hs_post` raises on
+      failures, that exception will bubble up. If it returns an error-shaped dict,
+      you may want to harden this function accordingly.
     """
-    out = []
-    after = None
-    fetched = 0
+    out = []          # raw page items as returned by HubSpot (each item has "id" + "properties")
+    after = None      # pagination cursor: HubSpot's "paging.next.after"
+    fetched = 0       # total items collected so far (across pages)
+
     while True:
-        body = dict(payload)  # shallow copy so we do not mutate the caller's payload
-        # Respect a caller-provided 'limit' but never exceed total_cap
+        # Work on a **shallow copy** so we do not mutate the caller's payload.
+        body = dict(payload)
+
+        # Determine a safe per-page limit. If the caller provided one, use it;
+        # otherwise default to 100. Then **clamp** so we do not exceed total_cap.
         limit = int(body.get("limit", 100))
-        limit = min(limit, max(0, total_cap - fetched))
+        limit = min(limit, max(0, total_cap - fetched))  # if cap already reached, becomes 0
+
+        # If nothing left to fetch (cap hit), stop before calling the API again.
         if limit <= 0:
             break
+
         body["limit"] = limit
+
+        # If we have a cursor from the previous page, include it to fetch the next page.
         if after is not None:
             body["after"] = after
 
+        # Perform the HTTP POST to HubSpot Search.
+        # `_hs_post` should add auth headers, serialize JSON, and raise/return on errors.
         j = _hs_post(endpoint, body)
+
+        # Pull this page's items (each item is a dict with keys like "id", "properties", etc.).
         results = j.get("results", [])
         out.extend(results)
         fetched += len(results)
 
+        # Prepare the cursor for the next loop iteration (if any).
         after = j.get("paging", {}).get("next", {}).get("after")
+
+        # Exit conditions:
+        #  - no more cursor (no more pages), or
+        #  - we have met/exceeded the requested total_cap.
         if not after or fetched >= total_cap:
             break
 
-    # Flatten to DataFrame (properties + id)
+    # Convert the accumulated raw items to a **flat** DataFrame:
+    #  - keep "properties" dict as columns
+    #  - also include the HubSpot object "id" column
     rows = []
     for r in out:
         props = r.get("properties", {}) or {}
         props["id"] = r.get("id")
         rows.append(props)
+
     return pd.DataFrame(rows)
 
 # ---- hs_get_deal_property_options ----
