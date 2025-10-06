@@ -70,6 +70,8 @@ def _call_openai(messages):
     """
     # IMPORTANT: do NOT check OPENAI_API_KEY here; it may be in st.secrets.
     # Only rely on the initialiser and the SDK module being present.
+    if not _openai_ok:
+        _init_openai()
     if not _openai_ok or (OpenAI is None and openai is None):
         # Optional: st.info("OpenAI not initialised; check OPENAI_API_KEY and requirements.")
         return ""
