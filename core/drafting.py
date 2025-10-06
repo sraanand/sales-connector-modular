@@ -4,6 +4,7 @@ import streamlit as st
 import pandas as pd
 from core.utils import *
 import os
+import re
 
 # --- OpenAI initialisation (safe and optional) ---
 try:
@@ -113,7 +114,8 @@ def _call_openai(messages):
 
     # As per your original contract, return empty string on failure
     return ""
-    
+
+
 # ---- draft_sms_reminder ----
 
 def draft_sms_reminder(name: str, pairs_text: str, video_urls: str = "") -> str:
@@ -144,6 +146,73 @@ def draft_sms_reminder(name: str, pairs_text: str, video_urls: str = "") -> str:
     
     return text if text.endswith("–Cars24 Laverton") else f"{text} –Cars24 Laverton".strip()
 
+# Draft SMS as the sales associated with personlised touch
+
+def _clip_sms(text: str, limit: int = 400) -> str:
+    """
+    Hard character cap for SMS body. Trims at limit and strips trailing spaces.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip()
+
+def draft_sms_reminder_associate(customer_name: str, pairs_text: str, associate_name: str, video_urls: str = "") -> str:
+    """
+    Personalised reminder written AS the allocated sales associate.
+    - Keeps your video URL behaviour
+    - Adds clear CTA to confirm or reschedule
+    - Signs with the associate's name (not '–Cars24 Laverton')
+    - Caps length at 400 chars
+    """
+    # Safety / fallback name
+    agent = (associate_name or "").strip() or "your Cars24 consultant"
+
+    # Build system + user prompt
+    system = (
+        "You write outbound SMS for Cars24 Laverton (Australia) as the SALES ASSOCIATE named below. "
+        "Tone: warm, polite, excited to meet the customer; Australian spelling. "
+        "You have already seen the car, it's in great condition, and you'll help the customer so everything goes smoothly. "
+        "Include a clear call to action to CONFIRM or RESCHEDULE. No emojis. Avoid apostrophes. "
+        "Keep the SMS under 400 characters including signature."
+    )
+
+    # Handle optional video URL list
+    url_list = [u.strip() for u in (video_urls or "").split(";") if u.strip()]
+    has_video = len(url_list) > 0
+    first_url = url_list[0] if has_video else ""
+
+    # Compose the user message describing the situation and hard signature rules
+    if has_video:
+        system += " If a vehicle video URL is provided, include that single URL and encourage a quick virtual tour."
+    user = (
+        f"Sales associate name: {agent}\n"
+        f"Recipient name: {customer_name or 'there'}\n"
+        f"Upcoming test drive(s): {pairs_text}\n"
+        f"Vehicle video URL (optional): {first_url}\n"
+        "Start the SMS with a friendly greeting that includes the associate's name and that they are from Cars24 Laverton. "
+        "Do NOT sign as '–Cars24 Laverton'. END the SMS with '–{associate_name}'. "
+        "CTA: ask the customer to confirm or reschedule."
+    )
+
+    # Ask the model
+    text = _call_openai([
+        {"role": "system", "content": system},
+        {"role": "user", "content": user}
+    ]) or ""
+
+    # Enforce signature formatting
+    sign = f"–{agent}"
+    t = (text or "").strip()
+
+    # If it accidentally signed with Cars24 or no sign, correct it
+    if not t.endswith(sign):
+        # Remove any trailing '–Cars24 Laverton' or similar
+        t = re.sub(r"–\s*Cars24\s+Laverton\s*$", "", t, flags=re.IGNORECASE).rstrip()
+        t = f"{t} {sign}".strip()
+
+    # Ensure <= 400 characters
+    return _clip_sms(t, 400)
 
 
 # ---- draft_sms_manager ----
