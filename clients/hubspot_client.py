@@ -10,6 +10,7 @@ import os
 def hs_headers() -> dict:
     return {"Authorization": f"Bearer {HUBSPOT_TOKEN}"}
 
+
 def _hs_token() -> str:
     """
     Resolve a HubSpot private app token from config or environment.
@@ -298,7 +299,43 @@ def hs_get_deal_property_options(property_name: str) -> list[dict]:
         st.info("Unexpected issue while fetching state options. Using default states.")
         return fallback_states
 
+# --- update the sales associate name based on random allocation at the time of Test Drive reminders --- #
 
+def hs_update_ticket_owner_map(deal_to_email: dict[str, str]) -> tuple[int, int]:
+    """
+    Batch-update 'ticket_owner' for many deals at once.
+    deal_to_email: { deal_id: owner_email, ... }
+
+    Returns (success_count, failure_count) measured as number of deals we *attempted* to update.
+    """
+    if not deal_to_email:
+        return 0, 0
+
+    url = f"{HS_ROOT}/crm/v3/objects/deals/batch/update"
+    success, fail = 0, 0
+
+    # HubSpot supports up to 100 inputs per batch
+    items = list(deal_to_email.items())
+    for i in range(0, len(items), 100):
+        chunk = items[i:i+100]
+        payload = {
+            "inputs": [
+                {"id": str(did), "properties": {"ticket_owner": str(email)}}
+                for did, email in chunk
+            ]
+        }
+        try:
+            r = requests.post(url, headers=hs_headers(), json=payload, timeout=25)
+            if r.status_code == 200:
+                success += len(chunk)
+            else:
+                fail += len(chunk)
+                st.warning(f"Failed to update ticket_owner batch: {r.text[:200]}")
+        except Exception as e:
+            fail += len(chunk)
+            st.warning(f"Error updating ticket_owner: {e}")
+
+    return success, fail
 
 # ---- hs_search_deals_by_date_property ----
 
