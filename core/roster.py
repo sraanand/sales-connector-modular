@@ -20,7 +20,7 @@ import pandas as pd
 # Keep ALL truth (email + nickname) here. You can extend this list later.
 ASSOCIATES: List[Dict[str, str]] = [
     {"name": "Thomas", "email": "thomas.trindall@cars24.com"},
-    {"name": "Ian",    "email": "zhan.hung@cars24.com"},
+    {"name": "Ian",    "email": "81519037"},
     {"name": "Aanand", "email": "sr.aanand@cars24.com"},
 ]
 
