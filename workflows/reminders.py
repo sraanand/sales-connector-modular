@@ -60,37 +60,37 @@ def view_reminders():
         # --- ROSTER: load, filter by availability, assign round-robin ---
 
         # a) Load the roster (one-time per run; cache if you want with st.cache_data)
-        ROSTER_URL = "https://docs.google.com/spreadsheets/d/1-9Ax-7GUymChhKaRXAyCxBG7oDNJ9wqBlxcZivzz8Ic/edit?usp=sharing"
-        roster_df = load_roster_df(ROSTER_URL)  # uses Service Account secrets or CSV fallback
-        st.write ({"roster_df":roster_df})
-        target_date = rem_date   # or whatever you set as the intended day
-        avail = available_associates_for_date(roster_df, target_date)
+        ROSTER_URL = "https://docs.google.com/spreadsheets/d/18tlixulLoYjFwAX_JTRf9Cvkln1Hbn9nJpPs8EZGO3U/edit?usp=sharing"
+        ROSTER_TAB = None  # or the exact tab name e.g. "Roster"
 
-        debug_dump_roster(ROSTER_URL, roster_df, target_date)
+        # Optional toggle to see debug
+        show_roster_debug = st.checkbox("Debug roster connection (strict)", value=False)
+
+        # Load (will raise with a clear message if something’s wrong)
+        try:
+            roster_df = load_roster_df(ROSTER_URL, worksheet_name=ROSTER_TAB)
+        except RuntimeError as e:
+            st.error(str(e))
+            roster_df = pd.DataFrame()  # stop gracefully
+
+        if show_roster_debug:
+            debug_roster_connectivity(ROSTER_URL, worksheet_name=ROSTER_TAB)
+
+        # Then use it as before
+        today_mel = datetime.now(MEL_TZ).date()  # or use 'rem_date' if that’s the send date
+        target_date = rem_date if 'rem_date' in locals() else today_mel
+        avail = available_associates_for_date(roster_df, target_date)
+        if not avail:
+            st.warning("No sales associates marked available for the selected date. SMS will be generic.")
+        else:
+            dedup = round_robin_assign(dedup, avail, target_date)
+       
+
+        st.write ({"roster_df":roster_df}) #debug to check whether the roster_df is loaded from the google sheet
         # Also show what 'avail' resolved to:
         st.write({"available_associates": avail})
 
-        # b) Determine the target date for reminders (the form's rem_date)
-        today_mel = datetime.now(MEL_TZ).date()  # or use 'rem_date' if that’s the send date
-        target_date = rem_date if 'rem_date' in locals() else today_mel
-
-        # c) Pick associates available on target_date
-        avail = available_associates_for_date(roster_df, target_date)
-
-        if not avail:
-            st.warning("No sales associates marked available for the selected date. SMS will be generic.")
-            # Proceed without assignment: dedup remains unchanged; message drafts will fall back to your existing function.
-        else:
-            # d) Assign round-robin and attach SalesAssociate / SalesEmail
-            dedup = round_robin_assign(dedup, avail, target_date)
-
-        if avail:
-            dedup = round_robin_assign(dedup, avail, target_date)
-            if debug_roster:
-                st.write("Assignment counts per associate:")
-                if "SalesAssociate" in dedup.columns:
-                    st.dataframe(dedup["SalesAssociate"].value_counts().to_frame("Leads"), use_container_width=True)
-
+        
         # 5) Build messages with audit
         # --- Build messages with associate personalisation (Reminders only) ---
         if dedup is None or dedup.empty:
