@@ -487,7 +487,27 @@ def update_deals_sms_sent(deal_ids: list[str]) -> tuple[int, int]:
     
     return success_count, failure_count
 
-
+def get_all_deal_ids_for_contacts(messages_df: pd.DataFrame, deals_df: pd.DataFrame) -> dict[str, list[str]]:
+    """
+    For each phone number in messages_df, get all associated deal IDs from deals_df.
+    Returns a dict mapping phone -> list of deal IDs
+    """
+    phone_to_deals = {}
+    
+    if messages_df is None or messages_df.empty or deals_df is None or deals_df.empty:
+        return phone_to_deals
+    
+    # Create a mapping of normalized phone to deal IDs
+    for _, msg_row in messages_df.iterrows():
+        phone = str(msg_row.get("Phone", "")).strip()
+        if not phone:
+            continue
+        
+        # Find all deals with this phone number
+        matching_deals = deals_df[deals_df["phone_norm"] == phone]["hs_object_id"].tolist()
+        phone_to_deals[phone] = [str(d) for d in matching_deals if d]
+    
+    return phone_to_deals
 
 # ---- export_sms_update_list ----
 
