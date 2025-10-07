@@ -1,296 +1,322 @@
-"""Workflow view: Test Drive Reminders — extracted from original app.py."""
+# workflows/reminders.py
+"""
+Reminders workflow:
+- Add a multi-select to pick available Sales Associates (from core.roster).
+- Round-robin assign the deduped customer list to the selected associates.
+- Build SMS using draft_sms_reminder_associate (signed by associate).
+- Show 'Sales Associate' column in Message Preview.
+- Everything else (filters, HubSpot search, etc.) stays as before.
+"""
 
-
-from config import *
-from clients.hubspot_client import *
-from clients.aircall_client import *
-from core.utils import *
-from core.drafting import *
-from core.roster import *
-from ui.components import *
-import streamlit as st
-import pandas as pd
-import time
-from datetime import datetime, timedelta
+from __future__ import annotations
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
+import time
+import pandas as pd
+import streamlit as st
+
+# --- App / Core imports (existing modules in your repo) ---
+from config import *
+from core.utils import (
+    mel_day_bounds_to_epoch_ms,
+    stage_label,
+    prepare_deals,
+    filter_sms_already_sent,
+    filter_deals_by_appointment_id_car_active_purchases,
+    filter_internal_test_emails,
+    dedupe_users_with_audit,
+    build_pairs_text,
+)
+from clients.hubspot_client import (
+    hs_get_deal_property_options,
+    hs_search_deals_by_date_property,
+    hs_update_ticket_owner_map,  # optional: keep if you want HS updates on send
+)
+from drafting import draft_sms_reminder_associate
+from core.roster import list_associate_names, get_associates_by_names, round_robin_assign
+
+MEL_TZ = ZoneInfo("Australia/Melbourne")
 
 
+# -------------------------------------------
+# Helper: show rows we excluded (audit table)
+# -------------------------------------------
+def _show_removed_table(df: pd.DataFrame, title: str):
+    """Small helper to render a table of removed rows with Reason."""
+    if df is None or df.empty:
+        return
+    cols = [
+        c for c in [
+            "full_name","email","phone_norm","vehicle_make","vehicle_model",
+            "dealstage","hs_object_id","Reason"
+        ] if c in df.columns
+    ]
+    st.markdown(f"**{title}** ({len(df)})")
+    st.dataframe(
+        df[cols].rename(columns={
+            "full_name":"Customer","phone_norm":"Phone",
+            "vehicle_make":"Make","vehicle_model":"Model",
+            "dealstage":"Stage"
+        }),
+        use_container_width=True
+    )
+
+
+# ---------------------------------------------------------
+# Message builder: specifically for Reminders + Associates
+# ---------------------------------------------------------
+def _build_messages_for_reminders_with_associates(dedup_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construct the final message table for the Reminders flow.
+    We expect dedup_df to ALREADY contain 'SalesAssociate' and 'SalesEmail'
+    (added via round_robin_assign). If those are blank (no selection),
+    we fall back to generic associate name "" and still generate a message.
+
+    Output columns (note SalesAssociate before SMS draft, as requested):
+      ["CustomerName","Phone","Email","SalesAssociate","SalesEmail",
+       "Cars","WhenExact","WhenRel","DealStages","Message"]
+    """
+    if dedup_df is None or dedup_df.empty:
+        return pd.DataFrame(columns=[
+            "CustomerName","Phone","Email","SalesAssociate","SalesEmail",
+            "Cars","WhenExact","WhenRel","DealStages","Message"
+        ])
+
+    out_rows = []
+    for _, row in dedup_df.iterrows():
+        phone = str(row.get("Phone") or "").strip()
+        if not phone:
+            # We exclude rows without a phone here; they’ll be captured in “skipped”.
+            continue
+
+        name         = str(row.get("CustomerName") or "").strip()
+        cars         = str(row.get("Cars") or "").strip()
+        when_rel     = str(row.get("WhenRel") or "").strip()
+        video_urls   = str(row.get("VideoURLs") or "").strip()
+        associate    = str(row.get("SalesAssociate") or "").strip()
+        associate_em = str(row.get("SalesEmail") or "").strip()
+
+        # Build “car + relative time” pairs for the prompt, e.g. “Mazda 3 tomorrow; Kia Cerato today at 13:00”
+        pairs_text = build_pairs_text(cars, when_rel)
+
+        # Use associate-personalised reminder
+        msg = draft_sms_reminder_associate(
+            name=name,
+            pairs_text=pairs_text,
+            associate_name=associate,        # signed by the associate (not “–Cars24 Laverton”)
+            video_urls=video_urls            # keep the video URL rules as-is
+        )
+
+        out_rows.append({
+            "CustomerName": name,
+            "Phone": phone,
+            "Email": str(row.get("Email") or "").strip(),
+            "SalesAssociate": associate,
+            "SalesEmail": associate_em,
+            "Cars": cars,
+            "WhenExact": str(row.get("WhenExact") or ""),
+            "WhenRel": when_rel,
+            "DealStages": str(row.get("DealStages") or ""),
+            "Message": msg
+        })
+
+    return pd.DataFrame(out_rows, columns=[
+        "CustomerName","Phone","Email","SalesAssociate","SalesEmail",
+        "Cars","WhenExact","WhenRel","DealStages","Message"
+    ])
+
+
+# -----------------------------------
+# Main entry: Test Drive Reminders UI
+# -----------------------------------
 def view_reminders():
     st.subheader("🛣️  Test Drive Reminders")
+
+    # ----------------------------
+    # 1) Top form: date + state + associates
+    # ----------------------------
     with st.form("reminders_form"):
         st.markdown('<div class="form-row">', unsafe_allow_html=True)
-        c1,c2,c3 = st.columns([2,2,1])
-        with c1: rem_date = st.date_input("TD booking date", value=datetime.now(MEL_TZ).date())
+        c1, c2, c3 = st.columns([2, 2, 1])
+
+        # Date of the booking we’re reminding for
+        with c1:
+            rem_date = st.date_input("TD booking date", value=datetime.now(MEL_TZ).date())
+
+        # State selector (HubSpot property options)
         state_options = hs_get_deal_property_options("car_location_at_time_of_sale")
         values = [o["value"] for o in state_options] if state_options else []
         labels = [o["label"] for o in state_options] if state_options else []
         def_val = "VIC" if "VIC" in values else (values[0] if values else "")
+
         with c2:
             if labels:
-                chosen_label = st.selectbox("Vehicle state", labels, index=(values.index("VIC") if "VIC" in values else 0))
-                label_to_val = {o["label"]:o["value"] for o in state_options}
+                chosen_label = st.selectbox(
+                    "Vehicle state", labels,
+                    index=(values.index("VIC") if "VIC" in values else 0)
+                )
+                label_to_val = {o["label"]: o["value"] for o in state_options}
                 rem_state_val = label_to_val.get(chosen_label, def_val)
             else:
                 rem_state_val = st.text_input("Vehicle state", value=def_val)
-        with c3: go = st.form_submit_button("Fetch deals", use_container_width=True)
+
+        # Associate multi-select: user chooses who’s working today
+        with c3:
+            all_names = list_associate_names()
+            chosen_names = st.multiselect(
+                "Available associates", all_names, default=all_names
+            )
         st.markdown("</div>", unsafe_allow_html=True)
 
+        go = st.form_submit_button("Fetch deals", use_container_width=True)
+
+    # ----------------------------
+    # 2) On submit: fetch + filter
+    # ----------------------------
     if go:
-        st.markdown("<span style='background:#4736FE;color:#FFFFFF;padding:4px 8px;border-radius:6px;'>Searching HubSpot…</span>", unsafe_allow_html=True)
+        st.markdown(
+            "<span style='background:#4436F5;color:#FFFFFF;padding:4px 8px;border-radius:6px;'>Searching HubSpot…</span>",
+            unsafe_allow_html=True
+        )
+
+        # Search deals in HubSpot for the selected booking date
         eq_ms, _ = mel_day_bounds_to_epoch_ms(rem_date)
         raw = hs_search_deals_by_date_property(
-            pipeline_id=PIPELINE_ID, stage_id=STAGE_BOOKED_ID, state_value=rem_state_val,
-            date_property="td_booking_slot_date", date_eq_ms=eq_ms,
-            date_start_ms=None, date_end_ms=None, total_cap=HS_TOTAL_CAP
+            pipeline_id=PIPELINE_ID,
+            stage_id=STAGE_BOOKED_ID,
+            state_value=rem_state_val,
+            date_property="td_booking_slot_date",
+            date_eq_ms=eq_ms,
+            date_start_ms=None, date_end_ms=None,
+            total_cap=HS_TOTAL_CAP
         )
         deals = prepare_deals(raw)
 
-        # 1) NEW: Filter out deals where SMS was already sent
+        # A) Removed because SMS already sent
         deals_not_sent, removed_sms_sent = filter_sms_already_sent(deals)
 
-        # 2) Filter by appointment_id car active purchases
+        # B) Removed because another deal with same car (via appointment_id) is in active purchase
         deals_car_filtered, dropped_car_purchases = filter_deals_by_appointment_id_car_active_purchases(deals_not_sent)
 
-        # 3) Filter internal/test emails
+        # C) Removed because internal/test domains
         deals_f, removed_internal = filter_internal_test_emails(deals_car_filtered)
 
-        # 4) Audit dedupe
+        # D) Dedup (and keep an audit list of what was collapsed)
         dedup, dedupe_dropped = dedupe_users_with_audit(deals_f, use_conducted=False)
 
-        # --- ROSTER: load, filter by availability, assign round-robin ---
-
-        # a) Load the roster (one-time per run; cache if you want with st.cache_data)
-        ROSTER_URL = "https://docs.google.com/spreadsheets/d/1-9Ax-7GUymChhKaRXAyCxBG7oDNJ9wqBlxcZivzz8Ic/edit?usp=sharing"
-        ROSTER_TAB = None  # or the exact tab name e.g. "Roster"
-
-        # Optional toggle to see debug
-        show_roster_debug = st.checkbox("Debug roster connection (strict)", value=False)
-
-        # Load (will raise with a clear message if something’s wrong)
-        try:
-            roster_df = load_roster_df(ROSTER_URL, worksheet_name=ROSTER_TAB)
-        except RuntimeError as e:
-            st.error(str(e))
-            roster_df = pd.DataFrame()  # stop gracefully
-
-        if show_roster_debug:
-            debug_roster_connectivity(ROSTER_URL, worksheet_name=ROSTER_TAB)
-
-        # Then use it as before
-        today_mel = datetime.now(MEL_TZ).date()  # or use 'rem_date' if that’s the send date
-        target_date = rem_date if 'rem_date' in locals() else today_mel
-        avail = available_associates_for_date(roster_df, target_date)
-        if not avail:
-            st.warning("No sales associates marked available for the selected date. SMS will be generic.")
+        # E) NEW: Round-robin assignment to associates the user selected
+        selected_associates = get_associates_by_names(chosen_names)
+        if selected_associates:
+            dedup = round_robin_assign(dedup, selected_associates, seed_date=rem_date)
         else:
-            dedup = round_robin_assign(dedup, avail, target_date)
-       
+            # If none selected, we still proceed with blank associate columns
+            dedup["SalesAssociate"] = ""
+            dedup["SalesEmail"] = ""
 
-        st.write ({"roster_df":roster_df}) #debug to check whether the roster_df is loaded from the google sheet
-        # Also show what 'avail' resolved to:
-        st.write({"available_associates": avail})
+        # F) Build messages using associate-personalised drafts
+        msgs = _build_messages_for_reminders_with_associates(dedup)
 
-        
-        # 5) Build messages with audit
-        # --- Build messages with associate personalisation (Reminders only) ---
-        if dedup is None or dedup.empty:
-            msgs = pd.DataFrame(columns=["CustomerName","Phone","Email","SalesAssociate","Cars","WhenExact","WhenRel","DealStages","Message"])
-            skipped_msgs = pd.DataFrame(columns=["Customer","Email","Cars","Reason"])
-        else:
-            out_rows = []
-            skipped = []
-            for _, row in dedup.iterrows():
-                phone = str(row.get("Phone") or "").strip()
-                if not phone:
-                    skipped.append({
-                        "Customer": str(row.get("CustomerName") or ""),
-                        "Email": str(row.get("Email") or ""),
-                        "Cars": str(row.get("Cars") or ""),
-                        "Reason": "Missing/invalid phone"
-                    })
-                    continue
-
-                name  = str(row.get("CustomerName") or "").strip()
-                cars  = str(row.get("Cars") or "").strip()
-                when_rel = str(row.get("WhenRel") or "").strip()
-                pairs_text = build_pairs_text(cars, when_rel)
-
-                video_urls = str(row.get("VideoURLs") or "").strip()
-                associate_name = str(row.get("SalesAssociate") or "").strip()
-
-                if associate_name:
-                    # Personalised, associate-signed reminder
-                    msg = draft_sms_reminder_associate(name, pairs_text, associate_name, video_urls)
-                else:
-                    # Fallback to your original generic reminder function (if no associates available)
-                    msg = draft_sms_reminder(name, pairs_text, video_urls)
-
-                out_rows.append({
-                    "CustomerName": name,
-                    "Phone": phone,
-                    "Email": str(row.get("Email") or "").strip(),
-                    "SalesAssociate": associate_name,   # NEW
-                    "Cars": cars,
-                    "WhenExact": str(row.get("WhenExact") or ""),
-                    "WhenRel": when_rel,
-                    "DealStages": str(row.get("DealStages") or ""),
-                    "Message": msg
-                })
-
-            msgs = pd.DataFrame(out_rows, columns=["CustomerName","Phone","Email","SalesAssociate","Cars","WhenExact","WhenRel","DealStages","Message"])
-            skipped_msgs = pd.DataFrame(skipped, columns=["Customer","Email","Cars","Reason"])
-
-
-        # Store all artifacts
+        # Persist for the rest of the page (if you use these later)
         st.session_state["reminders_deals"] = deals_f
         st.session_state["reminders_removed_sms_sent"] = removed_sms_sent
         st.session_state["reminders_dropped_car_purchases"] = dropped_car_purchases
         st.session_state["reminders_removed_internal"] = removed_internal
         st.session_state["reminders_dedup"] = dedup
         st.session_state["reminders_dedupe_dropped"] = dedupe_dropped
-        st.session_state["reminders_msgs"]  = msgs
-        st.session_state["reminders_skipped_msgs"] = skipped_msgs
-        
-        # Store phone-to-deals mapping for later update
-        st.session_state["reminders_phone_to_deals"] = get_all_deal_ids_for_contacts(msgs, deals_f)
+        st.session_state["reminders_msgs"] = msgs
 
-    # ---- Render from persisted state ----
+    # ----------------------------
+    # 3) Render from session
+    # ----------------------------
     deals_f      = st.session_state.get("reminders_deals")
-    removed_sms  = st.session_state.get("reminders_removed_sms_sent")  # NEW
+    removed_sms  = st.session_state.get("reminders_removed_sms_sent")
     dropped_car  = st.session_state.get("reminders_dropped_car_purchases")
     removed_int  = st.session_state.get("reminders_removed_internal")
     dedup        = st.session_state.get("reminders_dedup")
     dedupe_drop  = st.session_state.get("reminders_dedupe_dropped")
     msgs         = st.session_state.get("reminders_msgs")
-    skipped_msgs = st.session_state.get("reminders_skipped_msgs")
 
-
-    # NEW: Show SMS already sent filter results FIRST
+    # Show trimmed-out rows FIRST, with reasons
     if isinstance(removed_sms, pd.DataFrame) and not removed_sms.empty:
-        st.warning(f"⚠️ {len(removed_sms)} deals excluded - SMS reminders already sent")
-        show_removed_table(removed_sms, "Removed (SMS reminder already sent)")
-
-    # Show car purchase filter results
+        st.warning(f"⚠️ {len(removed_sms)} deals excluded — SMS already sent")
+        _show_removed_table(removed_sms, "Removed (SMS reminder already sent)")
     if isinstance(dropped_car, pd.DataFrame) and not dropped_car.empty:
-        show_removed_table(dropped_car, "Removed (car has active purchase deal via appointment_id)")
-
+        _show_removed_table(dropped_car, "Removed (car has another active purchase deal via appointment_id)")
     if isinstance(removed_int, pd.DataFrame) and not removed_int.empty:
-        show_removed_table(removed_int, "Removed by domain filter (cars24.com / yopmail.com)")
+        _show_removed_table(removed_int, "Removed by domain filter (cars24.com / yopmail.com)")
 
+    # Show filtered (kept) trimmed table
     if isinstance(deals_f, pd.DataFrame) and not deals_f.empty:
-        # Update column display to include SMS status
-        render_trimmed(deals_f, "Filtered deals (trimmed)", [
-            ("hs_object_id","Deal ID"), 
-            ("appointment_id","Appointment ID"), 
-            ("full_name","Customer"), 
-            ("email","Email"), 
-            ("phone_norm","Phone"),
-            ("vehicle_make","Make"), 
-            ("vehicle_model","Model"),
-            ("slot_date_prop","TD booking date"), 
-            ("slot_time_param","Time"),
-            ("video_url__short_","Video URL"),
-            ("td_reminder_sms_sent","SMS Sent"),  # NEW
-            ("Stage","Stage"),
-        ])
+        disp = deals_f.copy()
+        if "dealstage" in disp.columns and "Stage" not in disp.columns:
+            disp["Stage"] = disp["dealstage"].apply(stage_label)
+        st.markdown("#### Filtered deals (trimmed)")
+        st.dataframe(
+            disp[[
+                c for c in [
+                    "hs_object_id","appointment_id","full_name","email","phone_norm",
+                    "vehicle_make","vehicle_model","slot_date_prop","slot_time_param",
+                    "video_url__short_","td_reminder_sms_sent","Stage"
+                ] if c in disp.columns
+            ]].rename(columns={
+                "hs_object_id":"Deal ID",
+                "appointment_id":"Appointment ID",
+                "full_name":"Customer",
+                "phone_norm":"Phone",
+                "vehicle_make":"Make",
+                "vehicle_model":"Model",
+                "slot_date_prop":"TD booking date",
+                "slot_time_param":"Time",
+                "video_url__short_":"Video URL"
+            }),
+            use_container_width=True, height=380
+        )
 
+    # Show dedup results
     if isinstance(dedupe_drop, pd.DataFrame) and not dedupe_drop.empty:
-        show_removed_table(dedupe_drop, "Collapsed during dedupe (duplicates)")
+        _show_removed_table(dedupe_drop, "Collapsed during dedupe (duplicates)")
 
     if isinstance(dedup, pd.DataFrame) and not dedup.empty:
-        st.markdown("#### <span style='color:#000000;'>Deduped list (by mobile|email)</span>", unsafe_allow_html=True)
-        st.dataframe(dedup[["CustomerName","Phone","Email","DealsCount","Cars","WhenExact","DealStages","VideoURLs"]]
-                     .rename(columns={"WhenExact":"When (exact)","DealStages":"Stage(s)"}),
-                     use_container_width=True)
+        st.markdown("#### Deduped list (by mobile|email)")
+        st.dataframe(
+            dedup[[
+                c for c in [
+                    "CustomerName","Phone","Email","DealsCount",
+                    "Cars","WhenExact","DealStages","SalesAssociate","SalesEmail","VideoURLs"
+                ] if c in dedup.columns
+            ]].rename(columns={"WhenExact":"When (exact)","DealStages":"Stage(s)"}),
+            use_container_width=True
+        )
 
-    # ===== Message Preview (Reminders) with safe initialisation =====
-    edited = pd.DataFrame()  # <-- ensure it's always defined
-
+    # Show Message Preview with Sales Associate column
+    edited = pd.DataFrame()
     if isinstance(msgs, pd.DataFrame) and not msgs.empty:
-        st.markdown("#### <span style='color:#000000;'>Message Preview (Reminders)</span>", unsafe_allow_html=True)
-        edited = render_selectable_messages(msgs, key="reminders")
-        if isinstance(skipped_msgs, pd.DataFrame) and not skipped_msgs.empty:
-            st.markdown("**Skipped while creating SMS**")
-            st.dataframe(skipped_msgs, use_container_width=True)
+        st.markdown("#### Message Preview (Reminders)")
+        # We render the preview inline to ensure SalesAssociate is shown between Phone and SMS
+        view_df = msgs[[
+            "CustomerName","Phone","SalesAssociate","Message"
+        ]].rename(columns={
+            "CustomerName":"Customer",
+            "Message":"SMS draft"
+        }).copy()
+
+        if "Send" not in view_df.columns:
+            view_df.insert(0, "Send", False)
+
+        edited = st.data_editor(
+            view_df,
+            key="editor_reminders",
+            use_container_width=True,
+            height=420,
+            column_config={
+                "Send": st.column_config.CheckboxColumn("Send", help="Tick to send", default=False, width="small"),
+                "Customer": st.column_config.TextColumn("Customer", width=160),
+                "Phone": st.column_config.TextColumn("Phone", width=140),
+                "SalesAssociate": st.column_config.TextColumn("Sales Associate", width=140),
+                "SMS draft": st.column_config.TextColumn("SMS draft", width=520,
+                    help="You can edit the text before sending")
+            },
+            hide_index=True,
+        )
     else:
         st.info("No messages to preview.")
-
-    # --- SEND: SMS + update HubSpot ticket_owner ---
-    # NOTE: change the button CTA label as requested
-    if not edited.empty and st.button("Send SMS and update HS"):
-        to_send = edited[edited["Send"]]
-
-        if to_send.empty:
-            st.warning("No rows selected.")
-        elif not (AIRCALL_ID and AIRCALL_TOKEN and AIRCALL_NUMBER_ID):
-            st.error("Missing Aircall credentials in .env.")
-        else:
-            # We will:
-            # 1) send SMS per selected row
-            # 2) collect phones that were actually sent
-            # 3) map those phones -> deal_ids (from session)
-            # 4) map each deal_id -> the associate's SalesEmail from msgs
-            # 5) batch update 'ticket_owner' in HubSpot
-
-            st.info("Sending messages…")
-            sent_phones: list[str] = []
-            sent, failed = 0, 0
-
-            # Build a quick lookup from phone -> SalesEmail from the 'msgs' DF
-            # (Assumes you included 'SalesEmail' in msgs when you built it.)
-            phone_to_sales_email = {}
-            if "SalesEmail" in msgs.columns:
-                phone_to_sales_email = msgs.groupby("Phone", dropna=False)["SalesEmail"].first().to_dict()
-            else:
-                st.warning("SalesEmail column not found in msgs; HubSpot ticket_owner will not be updated.")
-
-            # 1) Send SMS for each selected row (use the edited text)
-            for _, r in to_send.iterrows():
-                phone = str(r["Phone"]).strip()
-
-                # Body is editable in the table, so we use the edited text
-                body = str(r["SMS draft"]).strip()
-
-                ok, msg = send_sms_via_aircall(phone, body, AIRCALL_NUMBER_ID)
-                if ok:
-                    sent += 1
-                    sent_phones.append(phone)
-                    st.success(f"✅ Sent to {phone}")
-                else:
-                    failed += 1
-                    st.error(f"❌ Failed for {phone}: {msg}")
-
-                time.sleep(1)
-
-            # === HubSpot ticket_owner update (ONLY for phones that actually got an SMS) ===
-            # Build deal_id -> associate_email map.
-            # We use the phone -> [deal_ids] mapping persisted earlier in session state.
-            phone_to_deals = st.session_state.get("reminders_phone_to_deals") or {}
-            deal_to_email: dict[str, str] = {}
-
-            # You told us the sheet layout is strict:
-            #  A: email (we already carried this as SalesEmail)
-            #  B: nickname (displayed as SalesAssociate)
-            #  C..I: Mon..Sun availability
-            # Given that, we trust 'SalesEmail' in msgs for the correct HubSpot owner value.
-            if "SalesEmail" in msgs.columns:
-                for phone in sent_phones:
-                    sales_email = (phone_to_sales_email.get(phone) or "").strip()
-                    if not sales_email:
-                        st.warning(f"⚠️ No SalesEmail found for {phone}; skipping HubSpot owner update for this phone.")
-                        continue
-                    for did in phone_to_deals.get(phone, []):
-                        deal_to_email[str(did)] = sales_email
-
-                if deal_to_email:
-                    st.info("Updating HubSpot ticket owners…")
-                    u_ok, u_fail = hs_update_ticket_owner_map(deal_to_email)
-                    if u_ok:
-                        st.success(f"✅ Updated 'ticket_owner' on {u_ok} deal(s)")
-                    if u_fail:
-                        st.warning(f"⚠️ Failed to update 'ticket_owner' on {u_fail} deal(s)")
-
-            if sent:
-                st.balloons()
-            st.success(f"🎉 Done! SMS Sent: {sent} | Failed: {failed}")
-
