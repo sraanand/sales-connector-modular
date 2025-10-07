@@ -168,7 +168,7 @@ def draft_sms_reminder_associate(
     Requirements:
       - Tone: warm, polite, Australian. AU spelling. No emojis/links except provided video URL.
       - Clear CTA to confirm or reschedule.
-      - Sign *with the associate’s name*, NOT '–Cars24 Laverton'.
+      - Sign *with the associate’s name*.
       - <= 400 characters.
       - If a video URL is provided, encourage viewing it before the TD.
 
@@ -189,9 +189,8 @@ def draft_sms_reminder_associate(
         "You write outbound SMS for Cars24 Laverton (Australia) as a named sales associate. "
         "Tone: warm, polite, inviting, Australian. AU spelling. Avoid apostrophes. "
         "Purpose: remind about the upcoming test drive, sound excited to show the car, "
-        "mention the car is in great condition, offer help with a smooth purchase process, "
-        "and include a clear call to confirm or reschedule. "
-        "If a video URL is provided, invite them to view it before the appointment. "
+        "mention the car is in great condition, named sales associate has seen it and is looking forward to meeting the customer and help him/her buy the car, "
+        "If a video URL is provided, in a new line invite the customer to view the video using the Video URL link before the appointment. Mention that the video is a pre-cursor to the inspection and will help the customer understand what to expect"
         "Do not include any links other than the provided video URL. "
         "Return ONLY the SMS text, no preamble."
     )
@@ -225,36 +224,11 @@ def draft_sms_reminder_associate(
 
     # Fallback template if model call failed or returned empty
     if not text.strip():
-        # Basic, friendly, associate-signed fallback under 400 chars
-        if first_video:
-            text = (
-                f"Hi {your}, {who} from Cars24 Laverton. "
-                f"Looking forward to your test drive ({pairs}). "
-                f"I’ve checked the car and it’s in great condition. "
-                f"Feel free to preview it here: {first_video}. "
-                f"Reply YES to confirm or let me know if you need to reschedule. –{who}"
-            )
-        else:
-            text = (
-                f"Hi {your}, {who} from Cars24 Laverton. "
-                f"Looking forward to your test drive ({pairs}). "
-                f"I’ve checked the car and it’s in great condition, and I’ll help keep everything smooth. "
-                f"Reply YES to confirm or let me know if you need to reschedule. –{who}"
-            )
+        text = ("DO NOT SEND MESSAGE. OpenAI failed")
 
-    # --- Post-process: enforce signature and 400-char limit ---
-    # Ensure the signature ends with '–{who}' exactly once
-    sig = f" –{who}"
-    if not text.strip().endswith(sig):
-        # If it ends with some other signature, strip it
-        for tail in ["–Cars24 Laverton", "-Cars24 Laverton", "—Cars24 Laverton"]:
-            if text.strip().endswith(tail):
-                text = text[: -len(tail)].rstrip()
-                break
-        # Append associate signature
-        text = (text.rstrip() + sig).strip()
 
     return text
+
 
 
 # ---- draft_sms_manager ----
