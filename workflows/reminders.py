@@ -60,7 +60,7 @@ def view_reminders():
         # --- ROSTER: load, filter by availability, assign round-robin ---
 
         # a) Load the roster (one-time per run; cache if you want with st.cache_data)
-        ROSTER_URL = "https://docs.google.com/spreadsheets/d/18tlixulLoYjFwAX_JTRf9Cvkln1Hbn9nJpPs8EZGO3U/edit?usp=sharing"
+        ROSTER_URL = "https://docs.google.com/spreadsheets/d/1-9Ax-7GUymChhKaRXAyCxBG7oDNJ9wqBlxcZivzz8Ic/edit?usp=sharing"
         ROSTER_TAB = None  # or the exact tab name e.g. "Roster"
 
         # Optional toggle to see debug
