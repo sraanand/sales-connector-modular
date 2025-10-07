@@ -1,6 +1,7 @@
 """Streamlit entrypoint — routes to modular workflows (parity preserved)."""
 
 import streamlit as st
+import pandas as pd
 from workflows.reminders import view_reminders
 from workflows.manager import view_manager
 from workflows.old_leads import view_old
