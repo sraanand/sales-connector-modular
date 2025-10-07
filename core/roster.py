@@ -51,39 +51,25 @@ def _weekday_col_for(d: date) -> str:
     """Return 'Mon'..'Sun' for the given date."""
     return DOW[d.weekday()]  # Monday == 0
 
-def _normalise_headers(cols: List[str]) -> List[str]:
-    """
-    Map arbitrary header text to expected names:
-    - First two columns: email, name (nickname)
-    - Next seven columns: Mon..Sun (accept variations like 'monday','mon','MON', etc.)
-    """
-    out = []
-    seen_days = 0
+def _normalise_headers(cols):
+    out, seen_days = [], 0
     for i, c in enumerate(cols):
         s = (c or "").strip()
         sl = s.lower()
-        if i == 0:
-            out.append("email")
-        elif i == 1:
-            out.append("name")
+        if i == 0: out.append("email"); continue
+        if i == 1: out.append("name");  continue
+        mapped = None
+        for j, day in enumerate(DOW):
+            if re.fullmatch(day, s, flags=re.IGNORECASE) or re.fullmatch(day.lower()+"day", sl):
+                mapped = DOW[j]; break
+        if mapped is None and seen_days < 7:
+            mapped = DOW[seen_days]
+        if mapped is not None:
+            out.append(mapped); seen_days += 1
         else:
-            # Try to detect the weekday name in the header text
-            # Accept 'monday', 'mon', 'Mon', etc.
-            mapped = None
-            for j, day in enumerate(DOW):
-                if re.search(rf"^{day}$", s, re.IGNORECASE) or re.search(rf"^{day}day$", sl):
-                    mapped = DOW[j]
-                    break
-            # If not matched by name but we're in C..I, just assign sequentially
-            if mapped is None and seen_days < 7:
-                mapped = DOW[seen_days]
-            if mapped is not None:
-                out.append(mapped)
-                seen_days += 1
-            else:
-                # Extra columns beyond 7 days: keep original
-                out.append(s or f"Col{i+1}")
+            out.append(s or f"Col{i+1}")
     return out
+
 
 def _get_gspread_client():
     """
@@ -91,6 +77,7 @@ def _get_gspread_client():
     Return None if gspread or credentials are unavailable.
     """
     if gspread is None or service_account is None:
+        st.info("gspread/google-auth not imported; falling back to CSV.")
         return None
     try:
         info = st.secrets.get("gcp_service_account")
@@ -102,18 +89,17 @@ def _get_gspread_client():
         ]
         creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
         return gspread.authorize(creds)
-    except Exception:
+    except Exception as e:
+        st.warning(f"Service account init failed: {e}; falling back to CSV.")
         return None
 
 def load_roster_df(sheet_url: str, worksheet_name: str | None = None) -> pd.DataFrame:
     """
-    Load the roster as a DataFrame with columns:
-      - email (str)
-      - name  (str)
-      - Mon..Sun (bools)
-    Tries gspread (service account). If unavailable, tries CSV export (public sheets).
+    Tries gspread (private sheet, service account). If that fails, tries CSV
+    (requires the sheet/tab to be public/published).
+    Always returns a DataFrame with columns: email, name, Mon..Sun (may be empty).
     """
-    # 1) Try gspread (private sheets; service account)
+    # 1) Private path via service account
     client = _get_gspread_client()
     if client is not None:
         try:
@@ -121,25 +107,30 @@ def load_roster_df(sheet_url: str, worksheet_name: str | None = None) -> pd.Data
             ws = sh.worksheet(worksheet_name) if worksheet_name else sh.sheet1
             raw = ws.get_all_values()
             if not raw:
-                return pd.DataFrame(columns=["email", "name"] + DOW)
+                st.warning("Roster sheet is empty (no values).")
+                return pd.DataFrame(columns=["email","name"] + DOW)
             df = pd.DataFrame(raw[1:], columns=_normalise_headers(raw[0]))
+            st.info(f"Roster loaded via gspread: rows={len(df)}")
             return _coerce_roster(df)
-        except Exception:
-            pass
+        except Exception as e:
+            st.warning(f"gspread read failed ({type(e).__name__}): {e}. Trying CSV fallback...")
 
-    # 2) Fallback: attempt CSV export (only works if the sheet is shared publicly)
+    # 2) CSV fallback (public or 'publish to web')
     try:
-        # Turn .../edit?... into .../export?format=csv
-        if "/edit" in sheet_url:
-            csv_url = sheet_url.split("/edit", 1)[0] + "/export?format=csv"
-        else:
-            csv_url = sheet_url
+        csv_url = _csv_url_from_share_url(sheet_url)
+        st.info(f"CSV fallback URL: {csv_url}")
         df = pd.read_csv(csv_url)
         df.columns = _normalise_headers(list(df.columns))
+        st.info(f"Roster loaded via CSV: rows={len(df)}")
         return _coerce_roster(df)
-    except Exception:
-        # Give a structured empty frame with expected columns
-        return pd.DataFrame(columns=["email", "name"] + DOW)
+    except Exception as e:
+        st.error(f"CSV fallback failed: {e}")
+        return pd.DataFrame(columns=["email","name"] + DOW)
+
+def _csv_url_from_share_url(sheet_url: str, gid: int | None = None) -> str:
+    base = sheet_url.split("/edit", 1)[0]
+    if gid is None: gid = int(st.secrets.get("ROSTER_GID", 0))
+    return f"{base}/export?format=csv&gid={gid}"
 
 def _coerce_roster(df: pd.DataFrame) -> pd.DataFrame:
     """
