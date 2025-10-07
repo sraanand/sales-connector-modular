@@ -446,29 +446,30 @@ def hs_batch_read_deals(deal_ids: list[str], props: list[str]) -> dict[str, dict
 
 # ---- update_deals_sms_sent ----
 
-def update_deals_sms_sent(deal_ids: list[str]) -> tuple[int, int]:
+def update_deals_sms_sent(deal_to_email: dict[str, str]) -> tuple[int, int]:
     """
-    Update the td_reminder_sms_sent property to 'true' for the given deal IDs.
+    Update the td_reminder_sms_sent property to 'true' and ticket_owner to the associate email for each deal.
     Returns (success_count, failure_count)
     """
-    if not deal_ids:
+    if not deal_to_email:
         return 0, 0
     
     success_count = 0
     failure_count = 0
     
     url = f"{HS_ROOT}/crm/v3/objects/deals/batch/update"
+    deal_ids = list(deal_to_email.keys())
     
     # Process in batches of 100 (HubSpot limit)
     for i in range(0, len(deal_ids), 100):
         batch = deal_ids[i:i+100]
-        
         inputs = []
         for deal_id in batch:
             inputs.append({
                 "id": str(deal_id),
                 "properties": {
-                    "td_reminder_sms_sent": "true"  # CHANGED FROM "Yes" to "true"
+                    "td_reminder_sms_sent": "true",
+                    "ticket_owner": deal_to_email[deal_id]
                 }
             })
         
