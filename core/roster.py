@@ -92,20 +92,52 @@ def _coerce_roster(df: pd.DataFrame) -> pd.DataFrame:
         work[d] = work[d].map(_truthy_cell)
     return work[["email", "name"] + DOW]
 
+REQUIRED_SA_KEYS = {
+    "type","project_id","private_key_id","private_key",
+    "client_email","client_id","auth_uri","token_uri",
+    "auth_provider_x509_cert_url","client_x509_cert_url"
+}
+
+def _load_service_account_from_secrets() -> dict:
+    """
+    Accepts any of:
+      1) st.secrets["gcp_service_account"] as a dict (TOML table).
+      2) st.secrets["gcp_service_account"] as a JSON string.
+      3) root-level SA keys in st.secrets (not recommended, but supported).
+    Returns a dict with the service account fields or raises RuntimeError.
+    """
+    # Case 1: dict under gcp_service_account
+    sa = st.secrets.get("gcp_service_account", None)
+    if isinstance(sa, dict) and "client_email" in sa and "private_key" in sa:
+        return sa
+
+    # Case 2: JSON string under gcp_service_account
+    if isinstance(sa, str) and sa.strip().startswith("{"):
+        try:
+            obj = json.loads(sa)
+            if isinstance(obj, dict) and "client_email" in obj and "private_key" in obj:
+                return obj
+        except Exception:
+            pass  # fall through
+
+    # Case 3: root-level keys
+    candidate = {k: st.secrets.get(k) for k in REQUIRED_SA_KEYS}
+    if all(candidate.values()):
+        return candidate
+
+    raise RuntimeError(
+        "Missing 'gcp_service_account' in Streamlit secrets OR it is not a dict/JSON, "
+        "and required root-level keys were not found.\n\n"
+        "Fix by using one of these:\n"
+        "  A) TOML table [gcp_service_account] with the full JSON fields\n"
+        "  B) A JSON string under key gcp_service_account\n"
+        "  C) (not recommended) put all service account fields at secrets root\n"
+    )
+
 def _get_gspread_client_strict():
-    """
-    Build a gspread client from Streamlit secrets.
-    Raises a descriptive RuntimeError if anything is missing.
-    """
     if gspread is None or service_account is None:
         raise RuntimeError("gspread/google-auth not installed. Add them to requirements.txt and redeploy.")
-    try:
-        info = st.secrets.get("gcp_service_account")
-    except Exception:
-        info = None
-    if not isinstance(info, dict):
-        raise RuntimeError("Missing 'gcp_service_account' in Streamlit secrets (entire SA JSON).")
-
+    info = _load_service_account_from_secrets()
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
@@ -114,7 +146,12 @@ def _get_gspread_client_strict():
         creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
         return gspread.authorize(creds)
     except Exception as e:
-        raise RuntimeError(f"Service account auth failed: {e}")
+        # Common pitfall: badly escaped private_key line breaks
+        raise RuntimeError(
+            "Service account auth failed. If the error mentions 'Invalid PEM formatted message', "
+            "make sure your 'private_key' in secrets preserves newlines (use triple quotes in TOML). "
+            f"Underlying error: {e}"
+        )
 
 def load_roster_df(sheet_url: str, worksheet_name: str | None = None) -> pd.DataFrame:
     """
