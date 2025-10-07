@@ -157,62 +157,104 @@ def _clip_sms(text: str, limit: int = 400) -> str:
         return text
     return text[:limit].rstrip()
 
-def draft_sms_reminder_associate(customer_name: str, pairs_text: str, associate_name: str, video_urls: str = "") -> str:
+def draft_sms_reminder_associate(
+    name: str,                 # <-- recipient/customer name (keyword used by workflow)
+    pairs_text: str,           # <-- e.g. "Mazda 3 tomorrow; Kia Cerato today 13:00"
+    associate_name: str,       # <-- the sales associate who’ll sign the SMS
+    video_urls: str = ""       # <-- semicolon-separated list; optional
+) -> str:
     """
-    Personalised reminder written AS the allocated sales associate.
-    - Keeps your video URL behaviour
-    - Adds clear CTA to confirm or reschedule
-    - Signs with the associate's name (not '–Cars24 Laverton')
-    - Caps length at 400 chars
-    """
-    # Safety / fallback name
-    agent = (associate_name or "").strip() or "your Cars24 consultant"
+    Generate a *reminder* SMS written by the assigned sales associate.
+    Requirements:
+      - Tone: warm, polite, Australian. AU spelling. No emojis/links except provided video URL.
+      - Clear CTA to confirm or reschedule.
+      - Sign *with the associate’s name*, NOT '–Cars24 Laverton'.
+      - <= 400 characters.
+      - If a video URL is provided, encourage viewing it before the TD.
 
-    # Build system + user prompt
+    We first try OpenAI via _call_openai(); if not available, we fall back to a template.
+    We also enforce the 400-char cap and signature at the end.
+    """
+    # Normalise inputs, keep things robust
+    who   = (associate_name or "").strip() or "Team at Cars24"
+    your  = (name or "there").strip()
+    pairs = (pairs_text or "").strip()
+    first_video = ""
+    if video_urls:
+        vids = [u.strip() for u in str(video_urls).split(";") if u.strip()]
+        first_video = vids[0] if vids else ""
+
+    # Build prompts
     system = (
-        "You write outbound SMS for Cars24 Laverton (Australia) as the SALES ASSOCIATE named below. "
-        "Tone: warm, polite, excited to meet the customer; Australian spelling. "
-        "You have already seen the car, it's in great condition, and you'll help the customer so everything goes smoothly. "
-        "Include a clear call to action to CONFIRM or RESCHEDULE. No emojis. Avoid apostrophes. "
-        "Keep the SMS under 400 characters including signature."
+        "You write outbound SMS for Cars24 Laverton (Australia) as a named sales associate. "
+        "Tone: warm, polite, inviting, Australian. AU spelling. Avoid apostrophes. "
+        "Purpose: remind about the upcoming test drive, sound excited to show the car, "
+        "mention the car is in great condition, offer help with a smooth purchase process, "
+        "and include a clear call to confirm or reschedule. "
+        "If a video URL is provided, invite them to view it before the appointment. "
+        "Do not include any links other than the provided video URL. "
+        "Return ONLY the SMS text, no preamble."
     )
 
-    # Handle optional video URL list
-    url_list = [u.strip() for u in (video_urls or "").split(";") if u.strip()]
-    has_video = len(url_list) > 0
-    first_url = url_list[0] if has_video else ""
+    # User instructions – keep it tight; we’ll post-trim to <= 400 chars
+    if first_video:
+        user = (
+            f"Recipient: {your}\n"
+            f"Associate: {who}\n"
+            f"Upcoming test drive(s): {pairs}\n"
+            f"Video URL: {first_video}\n"
+            "Write <= 400 characters. No emojis. Finish the message with ' –{associate}' signature."
+        ).replace("{associate}", who)
+    else:
+        user = (
+            f"Recipient: {your}\n"
+            f"Associate: {who}\n"
+            f"Upcoming test drive(s): {pairs}\n"
+            "Write <= 400 characters. No emojis. Finish the message with ' –{associate}' signature."
+        ).replace("{associate}", who)
 
-    # Compose the user message describing the situation and hard signature rules
-    if has_video:
-        system += " If a vehicle video URL is provided, include that single URL and encourage a quick virtual tour."
-    user = (
-        f"Sales associate name: {agent}\n"
-        f"Recipient name: {customer_name or 'there'}\n"
-        f"Upcoming test drive(s): {pairs_text}\n"
-        f"Vehicle video URL (optional): {first_url}\n"
-        "Start the SMS with a friendly greeting that includes the associate's name and that they are from Cars24 Laverton. "
-        "Do NOT sign as '–Cars24 Laverton'. END the SMS with '–{associate_name}'. "
-        "CTA: ask the customer to confirm or reschedule."
-    )
+    # Try OpenAI first
+    text = ""
+    try:
+        text = _call_openai([
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
+        ]) or ""
+    except Exception:
+        text = ""
 
-    # Ask the model
-    text = _call_openai([
-        {"role": "system", "content": system},
-        {"role": "user", "content": user}
-    ]) or ""
+    # Fallback template if model call failed or returned empty
+    if not text.strip():
+        # Basic, friendly, associate-signed fallback under 400 chars
+        if first_video:
+            text = (
+                f"Hi {your}, {who} from Cars24 Laverton. "
+                f"Looking forward to your test drive ({pairs}). "
+                f"I’ve checked the car and it’s in great condition. "
+                f"Feel free to preview it here: {first_video}. "
+                f"Reply YES to confirm or let me know if you need to reschedule. –{who}"
+            )
+        else:
+            text = (
+                f"Hi {your}, {who} from Cars24 Laverton. "
+                f"Looking forward to your test drive ({pairs}). "
+                f"I’ve checked the car and it’s in great condition, and I’ll help keep everything smooth. "
+                f"Reply YES to confirm or let me know if you need to reschedule. –{who}"
+            )
 
-    # Enforce signature formatting
-    sign = f"–{agent}"
-    t = (text or "").strip()
+    # --- Post-process: enforce signature and 400-char limit ---
+    # Ensure the signature ends with '–{who}' exactly once
+    sig = f" –{who}"
+    if not text.strip().endswith(sig):
+        # If it ends with some other signature, strip it
+        for tail in ["–Cars24 Laverton", "-Cars24 Laverton", "—Cars24 Laverton"]:
+            if text.strip().endswith(tail):
+                text = text[: -len(tail)].rstrip()
+                break
+        # Append associate signature
+        text = (text.rstrip() + sig).strip()
 
-    # If it accidentally signed with Cars24 or no sign, correct it
-    if not t.endswith(sign):
-        # Remove any trailing '–Cars24 Laverton' or similar
-        t = re.sub(r"–\s*Cars24\s+Laverton\s*$", "", t, flags=re.IGNORECASE).rstrip()
-        t = f"{t} {sign}".strip()
-
-    # Ensure <= 400 characters
-    return _clip_sms(t, 400)
+    return text
 
 
 # ---- draft_sms_manager ----
