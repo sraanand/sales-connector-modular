@@ -314,45 +314,45 @@ def view_reminders():
         st.info("No messages to preview.")
 
 
-    # MODIFIED: Send SMS button with deal update functionality
-        if not edited.empty and st.button("Send SMS"):
-            to_send = edited[edited["Send"]]
-            if to_send.empty:
-                st.warning("No rows selected.")
-            elif not (AIRCALL_ID and AIRCALL_TOKEN and AIRCALL_NUMBER_ID):
-                st.error("Missing Aircall credentials in .env.")
-            else:
-                st.info("Sending messages…")
-                sent, failed = 0, 0
-                sent_phones = []  # Track which phones were sent successfully
+# MODIFIED: Send SMS button with deal update functionality
+    if not edited.empty and st.button("Send SMS"):
+        to_send = edited[edited["Send"]]
+        if to_send.empty:
+            st.warning("No rows selected.")
+        elif not (AIRCALL_ID and AIRCALL_TOKEN and AIRCALL_NUMBER_ID):
+            st.error("Missing Aircall credentials in .env.")
+        else:
+            st.info("Sending messages…")
+            sent, failed = 0, 0
+            sent_phones = []  # Track which phones were sent successfully
+            
+            for _, r in to_send.iterrows():
+                ok, msg = send_sms_via_aircall(r["Phone"], r["SMS draft"], AIRCALL_NUMBER_ID)
+                if ok: 
+                    sent += 1
+                    sent_phones.append(r["Phone"])
+                    st.success(f"✅ Sent to {r['Phone']}")
+                else:  
+                    failed += 1
+                    st.error(f"❌ Failed for {r['Phone']}: {msg}")
+                time.sleep(1)
+            
+            # NEW: Update deals in HubSpot after successful sends
+            if sent_phones and st.session_state.get("reminders_phone_to_deals"):
+                st.info("Updating HubSpot deals...")
+                phone_to_deals = st.session_state["reminders_phone_to_deals"]
                 
-                for _, r in to_send.iterrows():
-                    ok, msg = send_sms_via_aircall(r["Phone"], r["SMS draft"], AIRCALL_NUMBER_ID)
-                    if ok: 
-                        sent += 1
-                        sent_phones.append(r["Phone"])
-                        st.success(f"✅ Sent to {r['Phone']}")
-                    else:  
-                        failed += 1
-                        st.error(f"❌ Failed for {r['Phone']}: {msg}")
-                    time.sleep(1)
+                all_deal_ids = []
+                for phone in sent_phones:
+                    if phone in phone_to_deals:
+                        all_deal_ids.extend(phone_to_deals[phone])
                 
-                # NEW: Update deals in HubSpot after successful sends
-                if sent_phones and st.session_state.get("reminders_phone_to_deals"):
-                    st.info("Updating HubSpot deals...")
-                    phone_to_deals = st.session_state["reminders_phone_to_deals"]
-                    
-                    all_deal_ids = []
-                    for phone in sent_phones:
-                        if phone in phone_to_deals:
-                            all_deal_ids.extend(phone_to_deals[phone])
-                    
-                    if all_deal_ids:
-                        update_success, update_fail = update_deals_sms_sent(all_deal_ids)
-                        if update_success > 0:
-                            st.success(f"✅ Updated {update_success} deals with SMS sent status")
-                        if update_fail > 0:
-                            st.warning(f"⚠️ Failed to update {update_fail} deals")
-                
-                if sent: st.balloons()
-                st.success(f"🎉 Done! SMS Sent: {sent} | Failed: {failed}") 
+                if all_deal_ids:
+                    update_success, update_fail = update_deals_sms_sent(all_deal_ids)
+                    if update_success > 0:
+                        st.success(f"✅ Updated {update_success} deals with SMS sent status")
+                    if update_fail > 0:
+                        st.warning(f"⚠️ Failed to update {update_fail} deals")
+            
+            if sent: st.balloons()
+            st.success(f"🎉 Done! SMS Sent: {sent} | Failed: {failed}") 
