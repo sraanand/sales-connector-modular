@@ -386,4 +386,3 @@ def header_and_route():
         view_unsold_summary()
 
 header_and_route()
-
