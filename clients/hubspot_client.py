@@ -470,7 +470,7 @@ def update_deals_sms_sent(deal_to_email: dict[str, str]) -> tuple[int, int]:
                 "id": str(deal_id),
                 "properties": {
                     "td_reminder_sms_sent": "true",
-                    "ticket_owner": str(uid) if uid is not None else None,
+                    "ticket_owner": uid if uid is not None else None,
                 }
             })
         
