@@ -20,6 +20,7 @@ import streamlit as st
 from config import *
 from core.utils import *
 from clients.hubspot_client import *
+from clients.aircall_client import *
 from core.drafting import *
 from core.roster import *
 
