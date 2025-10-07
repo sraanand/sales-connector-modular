@@ -62,17 +62,13 @@ def view_reminders():
         # a) Load the roster (one-time per run; cache if you want with st.cache_data)
         ROSTER_URL = "https://docs.google.com/spreadsheets/d/1-9Ax-7GUymChhKaRXAyCxBG7oDNJ9wqBlxcZivzz8Ic/edit?usp=sharing"
         roster_df = load_roster_df(ROSTER_URL)  # uses Service Account secrets or CSV fallback
+        st.write ({"roster_df":roster_df})
         target_date = rem_date   # or whatever you set as the intended day
         avail = available_associates_for_date(roster_df, target_date)
 
-        debug_roster = st.checkbox("Debug roster", value=False)
-
-        # ... after you compute roster_df, target_date, avail:
-        if debug_roster:
-            from core.roster import debug_dump_roster  # import inside to avoid circulars
-            debug_dump_roster(ROSTER_URL, roster_df, target_date)
-            # Also show what 'avail' resolved to:
-            st.write({"available_associates": avail})
+        debug_dump_roster(ROSTER_URL, roster_df, target_date)
+        # Also show what 'avail' resolved to:
+        st.write({"available_associates": avail})
 
         # b) Determine the target date for reminders (the form's rem_date)
         today_mel = datetime.now(MEL_TZ).date()  # or use 'rem_date' if that’s the send date
