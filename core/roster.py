@@ -58,7 +58,7 @@ def round_robin_assign(dedup_df: pd.DataFrame, associates: List[Dict[str, str]],
         roster = roster[offset:] + roster[:offset]
     rr = cycle(roster)
 
-    names, emails, ids = [], []
+    names, emails, ids = [], [], []
     for _i, _r in work.iterrows():
         a = next(rr)
         names.append(a["name"])
