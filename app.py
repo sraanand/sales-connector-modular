@@ -368,7 +368,44 @@ def ctas():
     </script>
     """, unsafe_allow_html=True)
 
+def render_selectable_messages(messages_df: pd.DataFrame, key: str) -> pd.DataFrame:
+    """
+    Generic message preview editor.
+    If 'SalesAssociate' exists, it is shown between Phone and SMS draft.
+    Otherwise we show the usual Customer, Phone, SMS draft.
+    """
+    if messages_df is None or messages_df.empty:
+        st.info("No messages to preview."); return pd.DataFrame()
 
+    base_cols = ["CustomerName","Phone","Message"]
+    cols = ["CustomerName","Phone","SalesAssociate","Message"] if "SalesAssociate" in messages_df.columns else base_cols
+
+    view_df = messages_df[cols].rename(columns={
+        "CustomerName":"Customer",
+        "Message":"SMS draft"
+    }).copy()
+
+    if "Send" not in view_df.columns:
+        view_df.insert(0, "Send", False)
+
+    col_cfg = {
+        "Send": st.column_config.CheckboxColumn("Send", default=False, width="small"),
+        "Customer": st.column_config.TextColumn("Customer", width=160),
+        "Phone": st.column_config.TextColumn("Phone", width=140),
+        "SMS draft": st.column_config.TextColumn("SMS draft", width=520),
+    }
+    if "SalesAssociate" in view_df.columns:
+        col_cfg["SalesAssociate"] = st.column_config.TextColumn("Sales Associate", width=140)
+
+    edited = st.data_editor(
+        view_df,
+        key=f"editor_{key}",
+        use_container_width=True,
+        height=420,
+        column_config=col_cfg,
+        hide_index=True,
+    )
+    return edited
 
 def header_and_route():
     header()
@@ -386,3 +423,4 @@ def header_and_route():
         view_unsold_summary()
 
 header_and_route()
+
