@@ -465,11 +465,12 @@ def update_deals_sms_sent(deal_to_email: dict[str, str]) -> tuple[int, int]:
         batch = deal_ids[i:i+100]
         inputs = []
         for deal_id in batch:
+            uid = deal_to_email.get(deal_id)
             inputs.append({
                 "id": str(deal_id),
                 "properties": {
                     "td_reminder_sms_sent": "true",
-                    "ticket_owner": deal_to_email[deal_id]
+                    "ticket_owner": str(uid) if uid is not None else None,
                 }
             })
         
