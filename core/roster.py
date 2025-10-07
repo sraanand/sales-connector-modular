@@ -1,225 +1,104 @@
 # core/roster.py
 """
-Roster loader + round-robin assignment for Test Drive Reminders.
+Simple, sheet-free roster utilities.
 
-The Google Sheet layout (one worksheet):
-- Column A: associate email (required)
-- Column B: associate nickname (display name in SMS)
-- Columns C..I: day-of-week availability flags per associate (Mon..Sun)
-  Cell values considered "available": "y", "yes", "true", "1" (case/whitespace-insensitive)
-
-We will:
-1) Load the sheet as a DataFrame.
-2) Normalise headers so we have canonical day names: Mon,Tue,Wed,Thu,Fri,Sat,Sun
-3) On a given date, pick associates with a true-ish flag under that day.
-4) Assign leads round-robin to those associates.
-
-This module is framework-agnostic; Streamlit is used only for secrets and optional info messages.
+We deliberately DROP Google Sheets and keep a fixed list of associates here.
+Reminders workflow will let the user pick from this list via a multi-select.
+Those selected will be assigned to the deduped customer list round-robin.
 """
 
 from __future__ import annotations
-import re
 from datetime import date
 from itertools import cycle
 from typing import List, Dict
 import pandas as pd
-import streamlit as st
 
-# Google auth / gspread
-try:
-    import gspread
-    from google.oauth2 import service_account
-except Exception:
-    gspread = None
-    service_account = None
 
-# --------- constants ----------
-# Canonical weekday abbreviations we’ll use as column names
-DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+# -----------------------------
+# 1) Static associate directory
+# -----------------------------
+# Keep ALL truth (email + nickname) here. You can extend this list later.
+ASSOCIATES: List[Dict[str, str]] = [
+    {"name": "Thomas", "email": "thomas.trindall@cars24.com"},
+    {"name": "Ian",    "email": "zhan.hung@cars24.com"},
+    {"name": "Aanand", "email": "sr.aanand@cars24.com"},
+]
 
-# --------- helpers ----------
 
-def _truthy_cell(val) -> bool:
-    """Interpret a cell value as availability True/False."""
-    if val is None:
-        return False
-    return str(val).strip().lower() in {"y", "yes", "true", "1"}
+def list_associate_names() -> List[str]:
+    """Return the list of nicknames (for display in the multi-select)."""
+    return [a["name"] for a in ASSOCIATES]
 
-def _normalise_headers(cols: list[str]) -> list[str]:
+
+def get_associates_by_names(selected_names: List[str]) -> List[Dict[str, str]]:
     """
-    Map the sheet’s header row to expected names:
-      A → 'email', B → 'name', C..I → Mon..Sun
-    We also accept header text like 'Monday', 'mon', etc.
+    Given a list of nicknames (as selected in the multi-select),
+    return [{"name": "...", "email": "..."}, ...] in the same order.
     """
-    out = []
-    seen_days = 0
-    for i, c in enumerate(cols):
-        s = (c or "").strip()
-        sl = s.lower()
-        if i == 0:
-            out.append("email")
-            continue
-        if i == 1:
-            out.append("name")
-            continue
-        mapped = None
-        for j, day in enumerate(DOW):
-            if re.fullmatch(day, s, flags=re.IGNORECASE) or re.fullmatch(day.lower() + "day", sl):
-                mapped = DOW[j]
-                break
-        if mapped is None and seen_days < 7:
-            # If headers are blank in C..I, still map them sequentially Mon..Sun
-            mapped = DOW[seen_days]
-        if mapped is not None:
-            out.append(mapped)
-            seen_days += 1
-        else:
-            out.append(s or f"Col{i+1}")
-    return out
+    selected = []
+    names_set = set(n.strip() for n in selected_names or [])
+    for a in ASSOCIATES:
+        if a["name"] in names_set:
+            selected.append({"name": a["name"], "email": a["email"]})
+    return selected
 
-def _coerce_roster(df: pd.DataFrame) -> pd.DataFrame:
+
+# -------------------------------------------------
+# 2) Round-robin assignment to a deduped lead list
+# -------------------------------------------------
+def round_robin_assign(
+    dedup_df: pd.DataFrame,
+    associates: List[Dict[str, str]],
+    *,
+    seed_date: date | None = None,
+) -> pd.DataFrame:
     """
-    Ensure the roster DF has: email, name, Mon..Sun (bool).
-    Missing columns are created; day cells are cast to booleans with _truthy_cell.
+    Attach SalesAssociate + SalesEmail to each row of dedup_df by cycling
+    through the selected associates.
+
+    Parameters
+    ----------
+    dedup_df : DataFrame
+        Expected columns (among others): ["CustomerName","Phone",...].
+        We will not mutate the input; a copy is returned.
+    associates : list of dict
+        [{"name":"Thomas","email":"..."}, ...] — must be non-empty.
+    seed_date : date | None
+        Optional date to create a deterministic offset so that the first
+        associate alternates daily. If None, no offset is applied.
+
+    Returns
+    -------
+    DataFrame
+        Same rows + two new columns: ["SalesAssociate","SalesEmail"].
+        If associates is empty or dedup_df is empty, we add empty columns.
     """
-    work = df.copy()
-    for c in ["email", "name"] + DOW:
-        if c not in work.columns:
-            work[c] = ""
-    work["email"] = work["email"].astype(str).str.strip()
-    work["name"]  = work["name"].astype(str).str.strip()
-    for d in DOW:
-        work[d] = work[d].map(_truthy_cell)
-    return work[["email", "name"] + DOW]
+    if dedup_df is None or dedup_df.empty:
+        out = dedup_df.copy() if isinstance(dedup_df, pd.DataFrame) else pd.DataFrame()
+        if isinstance(out, pd.DataFrame) and not out.empty:
+            out["SalesAssociate"] = ""
+            out["SalesEmail"] = ""
+        return out
 
-REQUIRED_SA_KEYS = {
-    "type","project_id","private_key_id","private_key",
-    "client_email","client_id","auth_uri","token_uri",
-    "auth_provider_x509_cert_url","client_x509_cert_url"
-}
+    if not associates:
+        out = dedup_df.copy()
+        out["SalesAssociate"] = ""
+        out["SalesEmail"] = ""
+        return out
 
-def _load_service_account_from_secrets() -> dict:
-    """
-    Accepts any of:
-      1) st.secrets["gcp_service_account"] as a dict (TOML table).
-      2) st.secrets["gcp_service_account"] as a JSON string.
-      3) root-level SA keys in st.secrets (not recommended, but supported).
-    Returns a dict with the service account fields or raises RuntimeError.
-    """
-    # Case 1: dict under gcp_service_account
-    sa = st.secrets.get("gcp_service_account", None)
-    if isinstance(sa, dict) and "client_email" in sa and "private_key" in sa:
-        return sa
+    # Stable order so assignments are repeatable within a run
+    work = dedup_df.copy().sort_values(
+        by=["Phone", "CustomerName"], na_position="last", kind="stable"
+    ).reset_index(drop=True)
 
-    # Case 2: JSON string under gcp_service_account
-    if isinstance(sa, str) and sa.strip().startswith("{"):
-        try:
-            obj = json.loads(sa)
-            if isinstance(obj, dict) and "client_email" in obj and "private_key" in obj:
-                return obj
-        except Exception:
-            pass  # fall through
+    # Optional deterministic offset by date so the first associate rotates
+    roster = associates[:]
+    if seed_date:
+        n = len(roster)
+        offset = (seed_date.year * 10000 + seed_date.month * 100 + seed_date.day) % n
+        roster = roster[offset:] + roster[:offset]
 
-    # Case 3: root-level keys
-    candidate = {k: st.secrets.get(k) for k in REQUIRED_SA_KEYS}
-    if all(candidate.values()):
-        return candidate
-
-    raise RuntimeError(
-        "Missing 'gcp_service_account' in Streamlit secrets OR it is not a dict/JSON, "
-        "and required root-level keys were not found.\n\n"
-        "Fix by using one of these:\n"
-        "  A) TOML table [gcp_service_account] with the full JSON fields\n"
-        "  B) A JSON string under key gcp_service_account\n"
-        "  C) (not recommended) put all service account fields at secrets root\n"
-    )
-
-def _get_gspread_client_strict():
-    if gspread is None or service_account is None:
-        raise RuntimeError("gspread/google-auth not installed. Add them to requirements.txt and redeploy.")
-    info = _load_service_account_from_secrets()
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    try:
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-        return gspread.authorize(creds)
-    except Exception as e:
-        # Common pitfall: badly escaped private_key line breaks
-        raise RuntimeError(
-            "Service account auth failed. If the error mentions 'Invalid PEM formatted message', "
-            "make sure your 'private_key' in secrets preserves newlines (use triple quotes in TOML). "
-            f"Underlying error: {e}"
-        )
-
-def load_roster_df(sheet_url: str, worksheet_name: str | None = None) -> pd.DataFrame:
-    """
-    STRICT loader: uses gspread + service account only.
-    - sheet_url: the Google Sheet URL you shared with the service account
-    - worksheet_name: optional exact tab name. If None, uses the first sheet.
-
-    Raises RuntimeError with a clear message on failure.
-    """
-    client = _get_gspread_client_strict()
-    try:
-        sh = client.open_by_url(sheet_url)   # will throw if the SA doesn't have access
-    except Exception as e:
-        raise RuntimeError(
-            "Cannot open sheet by URL. "
-            "Ensure the service account EMAIL in secrets is SHARED on the sheet "
-            f"(Viewer or Editor). Underlying error: {e}"
-        )
-
-    try:
-        ws = sh.worksheet(worksheet_name) if worksheet_name else sh.sheet1
-    except Exception as e:
-        raise RuntimeError(
-            f"Cannot access worksheet '{worksheet_name or 'sheet1'}'. "
-            "Check the tab name (case-sensitive) or pass the correct name. "
-            f"Underlying error: {e}"
-        )
-
-    raw = ws.get_all_values()
-    if not raw:
-        raise RuntimeError("Roster worksheet appears to be empty (no header/rows).")
-
-    header = _normalise_headers(raw[0])
-    df = pd.DataFrame(raw[1:], columns=header)
-    return _coerce_roster(df)
-
-def available_associates_for_date(roster: pd.DataFrame, d: date) -> List[Dict[str, str]]:
-    """Return [{'name': 'Nick', 'email': 'n@x.com'}, ...] for associates available on date d."""
-    if roster is None or roster.empty:
-        return []
-    col = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][d.weekday()]
-    if col not in roster.columns:
-        return []
-    out = []
-    for _, r in roster.iterrows():
-        if bool(r.get(col, False)) and r.get("email"):
-            out.append({"name": str(r.get("name") or "").strip(),
-                        "email": str(r.get("email") or "").strip()})
-    return out
-
-def round_robin_assign(dedup_df: pd.DataFrame, associates: List[Dict[str, str]], d: date) -> pd.DataFrame:
-    """
-    Attach SalesAssociate + SalesEmail to dedup_df by round-robin over associates.
-    Deterministic per-day via a stable sort and a date-derived offset.
-    """
-    if dedup_df is None or dedup_df.empty or not associates:
-        work = dedup_df.copy() if isinstance(dedup_df, pd.DataFrame) else pd.DataFrame()
-        if not work.empty:
-            work["SalesAssociate"] = ""
-            work["SalesEmail"] = ""
-        return work
-
-    work = dedup_df.copy().sort_values(by=["Phone", "CustomerName"], na_position="last", kind="stable").reset_index(drop=True)
-    n = len(associates)
-    seed = d.year * 10000 + d.month * 100 + d.day
-    offset = seed % n
-    rotation = associates[offset:] + associates[:offset]
-    rr = cycle(rotation)
+    rr = cycle(roster)
 
     names, emails = [], []
     for _idx, _row in work.iterrows():
@@ -230,27 +109,3 @@ def round_robin_assign(dedup_df: pd.DataFrame, associates: List[Dict[str, str]],
     work["SalesAssociate"] = names
     work["SalesEmail"] = emails
     return work
-
-# Optional: UI-first debug block (call from your view if needed)
-def debug_roster_connectivity(sheet_url: str, worksheet_name: str | None = None):
-    """Print explicit, UI-friendly diagnostics for the roster path."""
-    st.markdown("### 🛠 Roster (strict) debug")
-    try:
-        info = st.secrets.get("gcp_service_account")
-        sa_email = (info or {}).get("client_email", None)
-        st.write({"has_gspread": gspread is not None,
-                  "has_service_account": service_account is not None,
-                  "has_secret": isinstance(info, dict),
-                  "service_account_email": sa_email})
-        client = _get_gspread_client_strict()
-        sh = client.open_by_url(sheet_url)
-        st.write({"opened_sheet_title": sh.title})
-        ws = sh.worksheet(worksheet_name) if worksheet_name else sh.sheet1
-        st.write({"worksheet_title": ws.title})
-        raw = ws.get_all_values()
-        st.write({"rows": len(raw), "first_row": raw[0] if raw else []})
-        if raw:
-            df = _coerce_roster(pd.DataFrame(raw[1:], columns=_normalise_headers(raw[0])))
-            st.dataframe(df.head(20), use_container_width=True)
-    except Exception as e:
-        st.error(f"Roster connection failed: {e}")
