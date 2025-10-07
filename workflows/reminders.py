@@ -357,7 +357,7 @@ def view_reminders():
                         user_id = r.get("SalesUserId")
                         if phone in phone_to_deals:
                             for deal_id in phone_to_deals[phone]:
-                                deal_to_email[deal_id] = associate_email
+                                deal_to_email[deal_id] = user_id
                     update_success, update_fail = update_deals_sms_sent(deal_to_email)
                     if update_success > 0:
                         st.success(f"✅ Updated {update_success} deals with SMS sent status")
